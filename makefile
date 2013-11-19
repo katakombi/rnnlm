@@ -1,5 +1,5 @@
 CC = g++
-CFLAGS = -g -lm -O2 -Wall -funroll-loops -ffast-math
+CFLAGS = -g -lm -O2 -Wall -funroll-loops -ffast-math -Wno-unused-result
 
 all: rnnlmlib.o rnnlm
 
