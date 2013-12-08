@@ -22,6 +22,7 @@ static union{
         int j,i;
         } n;
 } d2i;
+#define NUMCENTS (1<<ncluster)
 
 #define EXP_A (1048576/M_LN2)
 #define EXP_C 60801
@@ -365,9 +366,9 @@ void CRnnLM::initNet()
 	exit(1);
     }
 
-    syn_d=(direct_t *)calloc((long long)direct_size, sizeof(direct_t));
+    if (filetype != COMPRESSED) syn_d=(direct_t *)calloc((long long)direct_size, sizeof(direct_t));
 
-    if (syn_d==NULL) {
+    if ((syn_d==NULL)&&(filetype!=COMPRESSED)) {
 	fprintf(stderr,"Memory allocation for direct connections failed (requested %lld bytes)\n", (long long)direct_size * (long long)sizeof(direct_t));
 	exit(1);
     }
@@ -432,7 +433,7 @@ void CRnnLM::initNet()
     }
 
     long long aa;
-    for (aa=0; aa<direct_size; aa++) syn_d[aa]=0;
+    if (syn_d) for (aa=0; aa<direct_size; aa++) syn_d[aa]=0;
 
     if (bptt>0) {
 	bptt_history=(int *)calloc((bptt+bptt_block+10), sizeof(int));
@@ -1315,7 +1316,10 @@ void CRnnLM::computeNet(int last_word, int word)
 
 	for (a=vocab_size; a<layer2_size; a++) {
 	    for (b=0; b<direct_order; b++) if (hash[b]) {
-		neu2[a].ac+=syn_d[hash[b]];		//apply current parameter and move to the next one
+                if (filetype==COMPRESSED)
+                  neu2[a].ac+=centroid[READ_SYNCD(hash[b])]; // use compressed direct connections
+                else
+                  neu2[a].ac+=syn_d[hash[b]];           //apply current parameter and move to the next one
 		hash[b]++;
 	    } else break;
 	}
@@ -1367,7 +1371,10 @@ void CRnnLM::computeNet(int last_word, int word)
 	    a=class_words[vocab[word].class_index][c];
 
 	    for (b=0; b<direct_order; b++) if (hash[b]) {
-		neu2[a].ac+=syn_d[hash[b]];
+                if (filetype==COMPRESSED)
+                  neu2[a].ac+=centroid[READ_SYNCD(hash[b])];
+                else
+                  neu2[a].ac+=syn_d[hash[b]];
 		hash[b]++;
 		hash[b]=hash[b]%direct_size;
 	    } else break;
@@ -1834,6 +1841,61 @@ void CRnnLM::trainNet()
     }
 }
 
+
+double CRnnLM::testNetKMean()
+{
+    int a, word, last_word, wordcn;
+    FILE *fi=fopen(test_file, "rb");
+    double logp, log_combine, log_other,prob_other;
+
+    last_word=0;                                        //last word = end of sentence
+    logp=0;
+    log_other=0;
+    log_combine=0;
+    prob_other=0;
+    wordcn=0;
+
+    copyHiddenLayerToInput();
+
+    if (bptt>0) for (a=0; a<bptt+bptt_block; a++) bptt_history[a]=0;
+    for (a=0; a<MAX_NGRAM_ORDER; a++) history[a]=0;
+    netReset();
+
+    while (1) {
+
+        word=readWordIndex(fi);         //read next word
+        computeNet(last_word, word);            //compute probability distribution
+        if (feof(fi)) break;            //end of file: report LOGP, PPL
+
+        if ((word!=-1) || (prob_other>0)) {
+            if (word==-1) {
+                logp+=-8;               //some ad hoc penalty - when mixing different vocabularies, single model score is not real PPL
+                log_combine+=log10(0 * lambda + prob_other*(1-lambda));
+            } else {
+                logp+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac);
+                log_combine+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac*lambda + prob_other*(1-lambda));
+            }
+            log_other+=log10(prob_other);
+            wordcn++;
+        }
+
+        copyHiddenLayerToInput();
+
+        if (last_word!=-1) neu0[last_word].ac=0;  //delete previous activation
+
+        last_word=word;
+
+        for (a=MAX_NGRAM_ORDER-1; a>0; a--) history[a]=history[a-1];
+        history[0]=last_word;
+
+        if (independent && (word==0)) netReset();
+    }
+    fclose(fi);
+
+    return exp10(-logp/(real)wordcn);
+}
+
+
 void CRnnLM::testNet()
 {
     int a, b, word, last_word, wordcn;
@@ -1959,6 +2021,136 @@ void CRnnLM::testNet()
 
     fclose(flog);
 }
+
+/*
+double CRnnLM::testNetKMean()
+{
+    int a, b, word, last_word, wordcn;
+    FILE *fi, *flog, *lmprob=NULL;
+    real prob_other, log_other, log_combine;
+    double d;
+
+//    restoreNet();
+
+    if (use_lmprob) {
+	lmprob=fopen(lmprob_file, "rb");
+    }
+
+    //TEST PHASE
+    //netFlush();
+
+    fi=fopen(test_file, "rb");
+    //sprintf(str, "%s.%s.output.txt", rnnlm_file, test_file);
+    //flog=fopen(str, "wb");
+    flog=stdout;
+
+    if (debug_mode>1)	{
+	if (use_lmprob) {
+    	    fprintf(flog, "Index   P(NET)          P(LM)           Word\n");
+    	    fprintf(flog, "--------------------------------------------------\n");
+	} else {
+    	    fprintf(flog, "Index   P(NET)          Word\n");
+    	    fprintf(flog, "----------------------------------\n");
+	}
+    }
+
+    last_word=0;					//last word = end of sentence
+    logp=0;
+    log_other=0;
+    log_combine=0;
+    prob_other=0;
+    wordcn=0;
+    copyHiddenLayerToInput();
+
+    if (bptt>0) for (a=0; a<bptt+bptt_block; a++) bptt_history[a]=0;
+    for (a=0; a<MAX_NGRAM_ORDER; a++) history[a]=0;
+    netReset();
+
+    while (1) {
+
+        word=readWordIndex(fi);		//read next word
+        computeNet(last_word, word);		//compute probability distribution
+        if (feof(fi)) break;		//end of file: report LOGP, PPL
+
+        if (use_lmprob) {
+            fscanf(lmprob, "%lf", &d);
+    	    prob_other=d;
+
+            goToDelimiter('\n', lmprob);
+        }
+
+        if ((word!=-1) || (prob_other>0)) {
+    	    if (word==-1) {
+    		logp+=-8;		//some ad hoc penalty - when mixing different vocabularies, single model score is not real PPL
+        	log_combine+=log10(0 * lambda + prob_other*(1-lambda));
+    	    } else {
+    		logp+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac);
+        	log_combine+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac*lambda + prob_other*(1-lambda));
+    	    }
+    	    log_other+=log10(prob_other);
+            wordcn++;
+        }
+
+	if (debug_mode>1) {
+    	    if (use_lmprob) {
+        	if (word!=-1) fprintf(flog, "%d\t%.10f\t%.10f\t%s", word, neu2[vocab[word].class_index+vocab_size].ac *neu2[word].ac, prob_other, vocab[word].word);
+        	else fprintf(flog, "-1\t0\t\t0\t\tOOV");
+    	    } else {
+        	if (word!=-1) fprintf(flog, "%d\t%.10f\t%s", word, neu2[vocab[word].class_index+vocab_size].ac *neu2[word].ac, vocab[word].word);
+        	else fprintf(flog, "-1\t0\t\tOOV");
+    	    }
+
+    	    fprintf(flog, "\n");
+    	}
+
+        if (dynamic>0) {
+            if (bptt>0) {
+                for (a=bptt+bptt_block-1; a>0; a--) bptt_history[a]=bptt_history[a-1];
+                bptt_history[0]=last_word;
+
+                for (a=bptt+bptt_block-1; a>0; a--) for (b=0; b<layer1_size; b++) {
+                    bptt_hidden[a*layer1_size+b].ac=bptt_hidden[(a-1)*layer1_size+b].ac;
+                    bptt_hidden[a*layer1_size+b].er=bptt_hidden[(a-1)*layer1_size+b].er;
+        	}
+            }
+            //
+            alpha=dynamic;
+    	    learnNet(last_word, word);    //dynamic update
+    	}
+        copyHiddenLayerToInput();
+
+        if (last_word!=-1) neu0[last_word].ac=0;  //delete previous activation
+
+        last_word=word;
+
+        for (a=MAX_NGRAM_ORDER-1; a>0; a--) history[a]=history[a-1];
+        history[0]=last_word;
+
+	if (independent && (word==0)) netReset();
+    }
+    fclose(fi);
+    if (use_lmprob) fclose(lmprob);
+
+    //write to log file
+    if (debug_mode>0) {
+	fprintf(flog, "\ntest log probability: %f\n", logp);
+	if (use_lmprob) {
+    	    fprintf(flog, "test log probability given by other lm: %f\n", log_other);
+    	    fprintf(flog, "test log probability %f*rnn + %f*other_lm: %f\n", lambda, 1-lambda, log_combine);
+	}
+
+	fprintf(flog, "\nPPL net: %f\n", exp10(-logp/(real)wordcn));
+	if (use_lmprob) {
+    	    fprintf(flog, "PPL other: %f\n", exp10(-log_other/(real)wordcn));
+    	    fprintf(flog, "PPL combine: %f\n", exp10(-log_combine/(real)wordcn));
+	}
+    }
+
+    fclose(flog);
+    return exp10(-logp/(real)wordcn);
+}
+*/
+
 
 void CRnnLM::testNbest()
 {
