@@ -22,10 +22,14 @@ static union{
         int j,i;
         } n;
 } d2i;
+
 #define EXP_A (1048576/M_LN2)
 #define EXP_C 60801
 #define FAST_EXP(y) (d2i.n.i = EXP_A*(y)+(1072693248-EXP_C),d2i.d)
 
+#define READ_SYNCD(x) ( ( ((uint16_t*)(syn_cd+((x)*ncluster)/8))[0] >> ((x)*ncluster%8) ) & (((uint16_t)(1<<ncluster))-1) )
+#define WRITE_SYNCD(x,y) { uint16_t z = ((uint16_t*)(syn_cd+(((x)*ncluster)/8)))[0] &=~(((uint16_t)(1<<ncluster)-1)<<((x)*ncluster%8)); \
+                           ((uint16_t*)(syn_cd+(((x)*ncluster)/8)))[0]=z^(((uint16_t)(y))<<((x)*ncluster%8)); }
 
 real CRnnLM::random(real min, real max)
 {
