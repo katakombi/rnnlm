@@ -825,7 +825,7 @@ void CRnnLM::restoreNet()    //will read whole network structure
 	    neu1[a].ac=d;
 	}
     }
-    if (filetype==BINARY) {
+    if ((filetype==BINARY)||(filetype==COMPRESSED)) {
 	fgetc(fi);
 	for (a=0; a<layer1_size; a++) {
 	    fread(&fl, 4, 1, fi);
@@ -842,7 +842,7 @@ void CRnnLM::restoreNet()    //will read whole network structure
 	    }
 	}
     }
-    if (filetype==BINARY) {
+    if (filetype==BINARY||filetype==COMPRESSED) {
 	for (b=0; b<layer1_size; b++) {
     	    for (a=0; a<layer0_size; a++) {
     		fread(&fl, 4, 1, fi);
@@ -880,7 +880,7 @@ void CRnnLM::restoreNet()    //will read whole network structure
     	    }
 	}
     }
-    if (filetype==BINARY) {
+    if (filetype==BINARY||filetype==COMPRESSED) {
 	if (layerc_size==0) {	//no compress layer
 	    for (b=0; b<layer2_size; b++) {
     		for (a=0; a<layer1_size; a++) {
@@ -921,17 +921,39 @@ void CRnnLM::restoreNet()    //will read whole network structure
     	for (aa=0; aa<direct_size; aa++) {
     	    fread(&fl, 4, 1, fi);
 	    syn_d[aa]=fl;
-
-	    /*fread(&si, 2, 1, fi);
-	    fl=si/(float)(4*256);
-	    syn_d[aa]=fl;*/
     	}
     }
-    //
+
+    if (filetype==COMPRESSED){
+        fread(&ncluster, sizeof(ncluster), 1, fi);
+        long long aa;
+
+        centroid=(direct_t*)calloc(sizeof(direct_t),NUMCENTS);
+
+        for (aa=0;aa<NUMCENTS;aa++)
+        {
+            fread(&(centroid[aa]), sizeof(direct_t), 1, fi);
+        }
+
+        syn_cd=(uint8_t *)calloc((long long)((direct_size*ncluster)/8+2), sizeof(uint8_t));
+
+        for (aa=0; aa<(direct_size*ncluster)/8+2; aa++) {
+            fread(&(syn_cd[aa]), sizeof(uint8_t), 1, fi);
+        }
+    }
 
     saveWeights();
 
     fclose(fi);
+
+    // if model not already compressed and clustering is requested
+    // quantize and kmean
+    if ((ncluster>0)&&(filetype!=COMPRESSED)){
+      quantize();
+      if (kmean_iter!=-1) kmean();
+    }
+}
+
 int compare(const void *x, const void *y)
 {
   if (*(double*)x == *(double*)y) return 0;
