@@ -135,8 +135,10 @@ int main(int argc, char **argv)
     	fprintf(stdout,"\t-gradient-cutoff <float>\n");
     	fprintf(stdout,"\t\tSet maximal absolute gradient value (to improve training stability, use lower values; default is 15, to turn off use 0)\n");
 
-    	//
+        fprintf(stdout,"\t-rand-seed <int>\n");
+        fprintf(stdout,"\t\tSet the initialization value for the random number generator; use this to train complementary models\n");
 
+    	//
     	fprintf(stdout,"Parameters for testing phase:\n");
 
     	fprintf(stdout,"\t-rnnlm <file>\n");
