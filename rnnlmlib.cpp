@@ -569,12 +569,13 @@ void CRnnLM::saveNet()       //will save the whole network structure
 	fprintf(fo, "\nHidden layer activation:\n");
 	for (a=0; a<layer1_size; a++) fprintf(fo, "%.4f\n", neu1[a].ac);
     }
-    if (filetype==BINARY) {
+    if ((filetype==BINARY)||(filetype==COMPRESSED)) {
     	for (a=0; a<layer1_size; a++) {
     	    fl=neu1[a].ac;
     	    fwrite(&fl, 4, 1, fo);
     	}
     }
+
     //////////
     if (filetype==TEXT) {
 	fprintf(fo, "\nWeights 0->1:\n");
@@ -584,7 +585,7 @@ void CRnnLM::saveNet()       //will save the whole network structure
     	    }
 	}
     }
-    if (filetype==BINARY) {
+    if ((filetype==BINARY)||(filetype==COMPRESSED)) {
 	for (b=0; b<layer1_size; b++) {
     	    for (a=0; a<layer0_size; a++) {
     		fl=syn0[a+b*layer0_size].weight;
@@ -619,7 +620,7 @@ void CRnnLM::saveNet()       //will save the whole network structure
     	    }
     	}
     }
-    if (filetype==BINARY) {
+    if ((filetype==BINARY)||(filetype==COMPRESSED)) {
 	if (layerc_size>0) {
 	    for (b=0; b<layerc_size; b++) {
 		for (a=0; a<layer1_size; a++) {
@@ -658,13 +659,17 @@ void CRnnLM::saveNet()       //will save the whole network structure
 	for (aa=0; aa<direct_size; aa++) {
     	    fl=syn_d[aa];
     	    fwrite(&fl, 4, 1, fo);
-
-    	    /*fl=syn_d[aa]*4*256;			//saving direct connections this way will save 50% disk space; several times more compression is doable by clustering
-    	    if (fl>(1<<15)-1) fl=(1<<15)-1;
-    	    if (fl<-(1<<15)) fl=-(1<<15);
-    	    si=(signed short int)fl;
-    	    fwrite(&si, 2, 1, fo);*/
 	}
+    }
+    if (filetype==COMPRESSED) {
+        fwrite(&ncluster, sizeof(ncluster), 1, fo);
+        long long aa;
+        for (aa=0; aa<NUMCENTS; aa++) {
+            fwrite(&(centroid[aa]), sizeof(direct_t), 1, fo);
+        }
+        for (aa=0; aa<(direct_size*ncluster)/8+2; aa++) {
+            fwrite(&(syn_cd[aa]), sizeof(uint8_t), 1, fo);
+        }
     }
     ////////
     fclose(fo);
