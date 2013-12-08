@@ -294,6 +294,7 @@ public:
     void setTestFile(char *str);
     void setRnnLMFile(char *str);
     void setLMProbFile(char *str) {strcpy(lmprob_file, str);}
+    void setCompressFile(char *str) {strcpy(compress_file, str);}
 
     void setFileType(int newt) {filetype=newt;}
 
@@ -318,6 +319,8 @@ public:
     void setDebugMode(int newDebug) {debug_mode=newDebug;}
     void setAntiKasparek(int newAnti) {anti_k=newAnti;}
     void setOneIter(int newOneIter) {one_iter=newOneIter;}
+    void setNCluster(int newNCluster) {ncluster=newNCluster;}
+    void setKMean(int newKMeanIter) { kmean_iter=newKMeanIter; }
 
     int getWordHash(char *word);
     void readWord(char *word, FILE *fin);
@@ -348,7 +351,10 @@ public:
     void useLMProb(int use) {use_lmprob=use;}
     void testNet();
     void testNbest();
+    double testNetKMean();
     void testGen();
+    void quantize();
+    void kmean();
 
     void matrixXvector(struct neuron *dest, struct neuron *srcvec, struct synapse *srcmatrix, int matrix_width, int from, int to, int from2, int to2, int type);
 };
