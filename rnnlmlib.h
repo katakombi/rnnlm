@@ -4,752 +4,359 @@
 // Version 0.3g
 // (c) 2010-2012 Tomas Mikolov (tmikolov@gmail.com)
 // (c) 2013      Stefan Kombrink (katakombi@gmail.com)
-// Coding Style: indent rnnlm.cpp -linux -nut -o -ts4 -i4
 //
 ///////////////////////////////////////////////////////////////////////
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <fstream>
-#include <iostream>
-#include "rnnlmlib.h"
+#ifndef _RNNLMLIB_H_
+#define _RNNLMLIB_H_
 
-using namespace std;
+#include <stdint.h>
 
-int argPos(char *str, int argc, char **argv)
-{
-    int a;
+#define MAX_STRING 100
+#define exp10(a) pow(10.0, a)
 
-    for (a = 1; a < argc; a++)
-        if (!strcmp(str, argv[a]))
-            return a;
+typedef double real;		// doubles for NN weights
+typedef double direct_t;	// doubles for ME weights; TODO: check why floats are not enough for RNNME (convergence problems)
 
-    return -1;
-}
+struct neuron {
+    real ac;		//actual value stored in neuron
+    real er;		//error value in neuron, used by learning algorithm
+};
 
-int main(int argc, char **argv)
-{
-    int i;
+struct synapse {
+    real weight;	//weight of synapse
+};
 
-    int debug_mode = 1;
+struct vocab_word {
+    int cn;
+    char word[MAX_STRING];
 
-    int fileformat = TEXT;
+    real prob;
+    int class_index;
+};
 
-    int train_mode = 0;
-    int valid_data_set = 0;
-    int test_data_set = 0;
-    int rnnlm_file_set = 0;
+const unsigned int PRIMES[]={108641969, 116049371, 125925907, 133333309, 145678979, 175308587, 197530793, 234567803, 251851741, 264197411, 330864029, 399999781,
+407407183, 459258997, 479012069, 545678687, 560493491, 607407037, 629629243, 656789717, 716048933, 718518067, 725925469, 733332871, 753085943, 755555077,
+782715551, 790122953, 812345159, 814814293, 893826581, 923456189, 940740127, 953085797, 985184539, 990122807};
+const unsigned int PRIMES_SIZE=sizeof(PRIMES)/sizeof(PRIMES[0]);
 
-    int alpha_set = 0, train_file_set = 0;
+const int MAX_NGRAM_ORDER=20;
 
-    int class_size = 100;
-    int old_classes = 0;
-    float lambda = 0.75;
-    float gradient_cutoff = 15;
-    float dynamic = 0;
-    float starting_alpha = 0.1;
-    float regularization = 0.0000001;
-    float min_improvement = 1.003;
-    int hidden_size = 30;
-    int compression_size = 0;
-    long long direct = 0;
-    int direct_order = 3;
-    int bptt = 0;
-    int bptt_block = 10;
-    int gen = 0;
-    int independent = 0;
-    int use_lmprob = 0;
-    int rand_seed = 1;
-    int nbest = 0;
-    int one_iter = 0;
-    int anti_k = 0;
-    int ncluster = 0;
-    int kmean_iter = -1;
+enum FileTypeEnum {TEXT, BINARY, COMPRESSED};		//COMPRESSED not yet implemented
 
+class CRnnLM{
+protected:
     char train_file[MAX_STRING];
     char valid_file[MAX_STRING];
     char test_file[MAX_STRING];
     char rnnlm_file[MAX_STRING];
-    char compress_file[MAX_STRING];
     char lmprob_file[MAX_STRING];
+    char compress_file[MAX_STRING];
 
-    FILE *f;
+    int rand_seed;
 
-    compress_file[0] = 0;
+    int debug_mode;
 
-    if (argc == 1) {
-        //printf("Help\n");
+    int version;
+    int filetype;
+    int ncluster;
+    int kmean_iter;
 
-        fprintf(stdout,
-                "Recurrent neural network based language modeling toolkit v 0.3g\n\n");
+    int use_lmprob;
+    real lambda;
+    real gradient_cutoff;
 
-        fprintf(stdout, "Options:\n");
+    real dynamic;
 
-        //
-        fprintf(stdout, "Parameters for training phase:\n");
+    real alpha;
+    real starting_alpha;
+    int alpha_divide;
+    double logp, llogp;
+    float min_improvement;
+    int iter;
+    int vocab_max_size;
+    int vocab_size;
+    int train_words;
+    int train_cur_pos;
+    int counter;
 
-        fprintf(stdout, "\t-train <file>\n");
-        fprintf(stdout, "\t\tUse text data from <file> to train rnnlm model\n");
+    int one_iter;
+    int anti_k;
 
-        fprintf(stdout, "\t-class <int>\n");
-        fprintf(stdout,
-                "\t\tWill use specified amount of classes to decompose vocabulary; default is 100\n");
+    real beta;
 
-        fprintf(stdout, "\t-old-classes\n");
-        fprintf(stdout,
-                "\t\tThis will use old algorithm to compute classes, which results in slower models but can be a bit more precise\n");
+    int class_size;
+    int **class_words;
+    int *class_cn;
+    int *class_max_cn;
+    int old_classes;
 
-        fprintf(stdout, "\t-rnnlm <file>\n");
-        fprintf(stdout, "\t\tUse <file> to store rnnlm model\n");
+    struct vocab_word *vocab;
+    void sortVocab();
+    int *vocab_hash;
+    int vocab_hash_size;
 
-        fprintf(stdout, "\t-binary\n");
-        fprintf(stdout,
-                "\t\tRnnlm model will be saved in binary format (default is plain text)\n");
+    int layer0_size;
+    int layer1_size;
+    int layerc_size;
+    int layer2_size;
 
-        fprintf(stdout, "\t-valid <file>\n");
-        fprintf(stdout, "\t\tUse <file> as validation data\n");
+    long long direct_size;
+    int direct_order;
+    int history[MAX_NGRAM_ORDER];
 
-        fprintf(stdout, "\t-alpha <float>\n");
-        fprintf(stdout, "\t\tSet starting learning rate; default is 0.1\n");
+    int bptt;
+    int bptt_block;
+    int *bptt_history;
+    neuron *bptt_hidden;
+    struct synapse *bptt_syn0;
 
-        fprintf(stdout, "\t-beta <float>\n");
-        fprintf(stdout,
-                "\t\tSet L2 regularization parameter; default is 1e-7\n");
+    int gen;
 
-        fprintf(stdout, "\t-hidden <int>\n");
-        fprintf(stdout, "\t\tSet size of hidden layer; default is 30\n");
+    int independent;
 
-        fprintf(stdout, "\t-compression <int>\n");
-        fprintf(stdout,
-                "\t\tSet size of compression layer; default is 0 (not used)\n");
+    struct neuron *neu0;		//neurons in input layer
+    struct neuron *neu1;		//neurons in hidden layer
+    struct neuron *neuc;		//neurons in hidden layer
+    struct neuron *neu2;		//neurons in output layer
 
-        fprintf(stdout, "\t-direct <int>\n");
-        fprintf(stdout,
-                "\t\tSets size of the hash for direct connections with n-gram features in millions; default is 0\n");
+    struct synapse *syn0;		//weights between input and hidden layer
+    struct synapse *syn1;		//weights between hidden and output layer (or hidden and compression if compression>0)
+    struct synapse *sync;		//weights between hidden and compression layer
+    direct_t *syn_d;		//direct parameters between input and output layer (similar to Maximum Entropy model parameters)
+    uint8_t *syn_cd;               // compressed direct parameters
+    direct_t *centroid;     
 
-        fprintf(stdout, "\t-direct-order <int>\n");
-        fprintf(stdout,
-                "\t\tSets the n-gram order for direct connections (max %d); default is 3\n",
-                MAX_NGRAM_ORDER);
+    //backup used in training:
+    struct neuron *neu0b;
+    struct neuron *neu1b;
+    struct neuron *neucb;
+    struct neuron *neu2b;
 
-        fprintf(stdout, "\t-bptt <int>\n");
-        fprintf(stdout,
-                "\t\tSet amount of steps to propagate error back in time; default is 0 (equal to simple RNN)\n");
+    struct synapse *syn0b;
+    struct synapse *syn1b;
+    struct synapse *syncb;
+    direct_t *syn_db;
 
-        fprintf(stdout, "\t-bptt-block <int>\n");
-        fprintf(stdout,
-                "\t\tSpecifies amount of time steps after which the error is backpropagated through time in block mode (default 10, update at each time step = 1)\n");
+    //backup used in n-bset rescoring:
+    struct neuron *neu1b2;
 
-        fprintf(stdout, "\t-one-iter\n");
-        fprintf(stdout,
-                "\t\tWill cause training to perform exactly one iteration over training data (useful for adapting final models on different data etc.)\n");
 
-        fprintf(stdout, "\t-anti-kasparek <int>\n");
-        fprintf(stdout,
-                "\t\tModel will be saved during training after processing specified amount of words\n");
+public:
 
-        fprintf(stdout, "\t-min-improvement <float>\n");
-        fprintf(stdout,
-                "\t\tSet minimal relative entropy improvement for training convergence; default is 1.003\n");
+    int alpha_set, train_file_set;
 
-        fprintf(stdout, "\t-gradient-cutoff <float>\n");
-        fprintf(stdout,
-                "\t\tSet maximal absolute gradient value (to improve training stability, use lower values; default is 15, to turn off use 0)\n");
+    CRnnLM()		//constructor initializes variables
+    {
+	version=10;
+        ncluster=0;
+        kmean_iter=-1;
+	filetype=TEXT;
 
-        fprintf(stdout, "\t-rand-seed <int>\n");
-        fprintf(stdout,
-                "\t\tSet the initialization value for the random number generator; use this to train complementary models\n");
+	use_lmprob=0;
+	lambda=0.75;
+	gradient_cutoff=15;
+	dynamic=0;
 
-        //
-        fprintf(stdout, "Parameters for testing phase:\n");
+	train_file[0]=0;
+	valid_file[0]=0;
+	test_file[0]=0;
+	rnnlm_file[0]=0;
+        compress_file[0]=0;
 
-        fprintf(stdout, "\t-rnnlm <file>\n");
-        fprintf(stdout, "\t\tRead rnnlm model from <file>\n");
+	alpha_set=0;
+	train_file_set=0;
 
-        fprintf(stdout, "\t-test <file>\n");
-        fprintf(stdout, "\t\tUse <file> as test data to report perplexity\n");
+	alpha=0.1;
+	beta=0.0000001;
+	//beta=0.00000;
+	alpha_divide=0;
+	logp=0;
+	llogp=-100000000;
+	iter=0;
 
-        fprintf(stdout, "\t-lm-prob\n");
-        fprintf(stdout,
-                "\t\tUse other LM probabilities for linear interpolation with rnnlm model; see examples at the rnnlm webpage\n");
+	min_improvement=1.003;
 
-        fprintf(stdout, "\t-lambda <float>\n");
-        fprintf(stdout,
-                "\t\tSet parameter for linear interpolation of rnnlm and other lm; default weight of rnnlm is 0.75\n");
+	train_words=0;
+	train_cur_pos=0;
+	vocab_max_size=100;
+	vocab_size=0;
+	vocab=(struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
 
-        fprintf(stdout, "\t-dynamic <float>\n");
-        fprintf(stdout,
-                "\t\tSet learning rate for dynamic model updates during testing phase; default is 0 (static model)\n");
+	layer1_size=30;
 
-        fprintf(stdout, "\t-compress <int>\n");
-        fprintf(stdout,
-                "\t\tCompress the ME part of an RNNME model (direct connections)\n");
-        fprintf(stdout,
-                "\t\tUse given number of bits for compression (between 3 and 8)\n");
+	direct_size=0;
+	direct_order=0;
 
-        fprintf(stdout, "\t-kmean <int>\n");
-        fprintf(stdout,
-                "\t\tImprove compression by given number of iterations of kmean clustering\n");
+	bptt=0;
+	bptt_block=10;
+	bptt_history=NULL;
+	bptt_hidden=NULL;
+	bptt_syn0=NULL;
 
-        fprintf(stdout, "\t-write-compressed <file>\n");
-        fprintf(stdout, "\t\tWrite the compressed model to disk\n");
+	gen=0;
 
-        //
+	independent=0;
 
-        fprintf(stdout, "Additional parameters:\n");
+	neu0=NULL;
+	neu1=NULL;
+	neuc=NULL;
+	neu2=NULL;
 
-        fprintf(stdout, "\t-gen <int>\n");
-        fprintf(stdout,
-                "\t\tGenerate specified amount of words given distribution from current model\n");
+	syn0=NULL;
+	syn1=NULL;
+	sync=NULL;
+	syn_d=NULL;
+        syn_cd=NULL;
+        centroid=NULL;
+	syn_db=NULL;
+	//backup
+	neu0b=NULL;
+	neu1b=NULL;
+	neucb=NULL;
+	neu2b=NULL;
 
-        fprintf(stdout, "\t-independent\n");
-        fprintf(stdout,
-                "\t\tWill erase history at end of each sentence (if used for training, this switch should be used also for testing & rescoring)\n");
+	neu1b2=NULL;
 
-        fprintf(stdout, "\nExamples:\n");
-        fprintf(stdout,
-                "rnnlm -train train -rnnlm model -valid valid -hidden 50\n");
-        fprintf(stdout, "rnnlm -rnnlm model -test test\n");
-        fprintf(stdout, "rnnlm -rnnlm model -compress 4 -test test\n");
-        fprintf(stdout, "\n");
+	syn0b=NULL;
+	syn1b=NULL;
+	syncb=NULL;
+	//
 
-        return 0;               //***
-    }
-    //set debug mode
-    i = argPos((char *)"-debug", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: debug mode not specified!\n");
-            return 0;
-        }
+	rand_seed=1;
 
-        debug_mode = atoi(argv[i + 1]);
+	class_size=100;
+	old_classes=0;
 
-        if (debug_mode > 0)
-            fprintf(stderr, "debug mode: %d\n", debug_mode);
-    }
-    //search for train file
-    i = argPos((char *)"-train", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: training data file not specified!\n");
-            return 0;
-        }
+	one_iter=0;
 
-        strcpy(train_file, argv[i + 1]);
+	debug_mode=1;
+	srand(rand_seed);
 
-        if (debug_mode > 0)
-            fprintf(stderr, "train file: %s\n", train_file);
-
-        f = fopen(train_file, "rb");
-        if (f == NULL) {
-            fprintf(stderr, "ERROR: training data file not found!\n");
-            return 0;
-        }
-
-        train_mode = 1;
-
-        train_file_set = 1;
-    }
-    //set one-iter
-    i = argPos((char *)"-one-iter", argc, argv);
-    if (i > 0) {
-        one_iter = 1;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Training for one iteration\n");
-    }
-    //search for validation file
-    i = argPos((char *)"-valid", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: validation data file not specified!\n");
-            return 0;
-        }
-
-        strcpy(valid_file, argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "valid file: %s\n", valid_file);
-
-        f = fopen(valid_file, "rb");
-        if (f == NULL) {
-            fprintf(stderr, "ERROR: validation data file not found!\n");
-            return 0;
-        }
-
-        valid_data_set = 1;
+	vocab_hash_size=100000000;
+	vocab_hash=(int *)calloc(vocab_hash_size, sizeof(int));
     }
 
-    if (train_mode && !valid_data_set) {
-        if (one_iter == 0) {
-            fprintf(stderr,
-                    "ERROR: validation data file must be specified for training!\n");
-            return 0;
-        }
-    }
-    //set nbest rescoring mode
-    i = argPos((char *)"-nbest", argc, argv);
-    if (i > 0) {
-        nbest = 1;
-        if (debug_mode > 0)
-            fprintf(stderr, "Processing test data as list of nbests\n");
-    }
-    //search for test file
-    i = argPos((char *)"-test", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: test data file not specified!\n");
-            return 0;
-        }
+    ~CRnnLM()		//destructor, deallocates memory
+    {
+	int i;
 
-        strcpy(test_file, argv[i + 1]);
+	if (neu0!=NULL) {
+	    free(neu0);
+	    free(neu1);
+	    if (neuc!=NULL) free(neuc);
+	    free(neu2);
 
-        if (debug_mode > 0)
-            fprintf(stderr, "test file: %s\n", test_file);
+	    free(syn0);
+	    free(syn1);
+	    if (sync!=NULL) free(sync);
 
-        if (nbest && (!strcmp(test_file, "-"))) ;
-        else {
-            f = fopen(test_file, "rb");
-            if (f == NULL) {
-                fprintf(stderr, "ERROR: test data file not found!\n");
-                return 0;
-            }
-        }
+	    if (syn_cd!=NULL) free(syn_cd);
 
-        test_data_set = 1;
-    }
-    //set class size parameter
-    i = argPos((char *)"-class", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: amount of classes not specified!\n");
-            return 0;
-        }
+	    if (syn_d!=NULL) free(syn_d);
 
-        class_size = atoi(argv[i + 1]);
+	    if (syn_db!=NULL) free(syn_db);
 
-        if (debug_mode > 0)
-            fprintf(stderr, "class size: %d\n", class_size);
-    }
-    //set old class
-    i = argPos((char *)"-old-classes", argc, argv);
-    if (i > 0) {
-        old_classes = 1;
+	    //
+	    free(neu0b);
+	    free(neu1b);
+	    if (neucb!=NULL) free(neucb);
+	    free(neu2b);
 
-        if (debug_mode > 0)
-            fprintf(stderr,
-                    "Old algorithm for computing classes will be used\n");
-    }
-    //set lambda
-    i = argPos((char *)"-lambda", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: lambda not specified!\n");
-            return 0;
-        }
+	    free(neu1b2);
 
-        lambda = atof(argv[i + 1]);
+	    free(syn0b);
+	    free(syn1b);
+	    if (syncb!=NULL) free(syncb);
+            if (centroid!=NULL) free (centroid);
+	    //
 
-        if (debug_mode > 0)
-            fprintf(stderr,
-                    "Lambda (interpolation coefficient between rnnlm and other lm): %f\n",
-                    lambda);
-    }
-    //set gradient cutoff
-    i = argPos((char *)"-gradient-cutoff", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: gradient cutoff not specified!\n");
-            return 0;
-        }
+	    for (i=0; i<class_size; i++) free(class_words[i]);
+	    free(class_max_cn);
+	    free(class_cn);
+	    free(class_words);
 
-        gradient_cutoff = atof(argv[i + 1]);
+	    free(vocab);
+	    free(vocab_hash);
 
-        if (debug_mode > 0)
-            fprintf(stderr, "Gradient cutoff: %f\n", gradient_cutoff);
-    }
-    //set dynamic
-    i = argPos((char *)"-dynamic", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: dynamic learning rate not specified!\n");
-            return 0;
-        }
+	    if (bptt_history!=NULL) free(bptt_history);
+	    if (bptt_hidden!=NULL) free(bptt_hidden);
+            if (bptt_syn0!=NULL) free(bptt_syn0);
 
-        dynamic = atof(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Dynamic learning rate: %f\n", dynamic);
-    }
-    //set compress
-    i = argPos((char *)"-compress", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: number of bits not specified!\n");
-            return 0;
-        }
-
-        ncluster = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Number of clustering bits: %d\n", ncluster);
-    }
-    //set kmean
-    i = argPos((char *)"-kmean", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: number of iterations not specified!\n");
-            return 0;
-        }
-
-        kmean_iter = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr,
-                    "Using kmean quantization with given number of iterations: %d\n",
-                    kmean_iter);
-    }
-    //set write-compressed
-    i = argPos((char *)"-write-compressed", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr,
-                    "ERROR: compressed model filename not specified!\n");
-            return 0;
-        }
-
-        strcpy(compress_file, argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Writing compressed model to: %s\n", compress_file);
-    }
-    //set gen
-    i = argPos((char *)"-gen", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: gen parameter not specified!\n");
-            return 0;
-        }
-
-        gen = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Generating # words: %d\n", gen);
-    }
-    //set independent
-    i = argPos((char *)"-independent", argc, argv);
-    if (i > 0) {
-        independent = 1;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Sentences will be processed independently...\n");
-    }
-    //set learning rate
-    i = argPos((char *)"-alpha", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: alpha not specified!\n");
-            return 0;
-        }
-
-        starting_alpha = atof(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Starting learning rate: %f\n", starting_alpha);
-        alpha_set = 1;
-    }
-    //set regularization
-    i = argPos((char *)"-beta", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: beta not specified!\n");
-            return 0;
-        }
-
-        regularization = atof(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Regularization: %f\n", regularization);
-    }
-    //set min improvement
-    i = argPos((char *)"-min-improvement", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr,
-                    "ERROR: minimal improvement value not specified!\n");
-            return 0;
-        }
-
-        min_improvement = atof(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Min improvement: %f\n", min_improvement);
-    }
-    //set anti kasparek
-    i = argPos((char *)"-anti-kasparek", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: anti-kasparek parameter not set!\n");
-            return 0;
-        }
-
-        anti_k = atoi(argv[i + 1]);
-
-        if ((anti_k != 0) && (anti_k < 10000))
-            anti_k = 10000;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Model will be saved after each # words: %d\n",
-                    anti_k);
-    }
-    //set hidden layer size
-    i = argPos((char *)"-hidden", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: hidden layer size not specified!\n");
-            return 0;
-        }
-
-        hidden_size = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Hidden layer size: %d\n", hidden_size);
-    }
-    //set compression layer size
-    i = argPos((char *)"-compression", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: compression layer size not specified!\n");
-            return 0;
-        }
-
-        compression_size = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Compression layer size: %d\n", compression_size);
-    }
-    //set direct connections
-    i = argPos((char *)"-direct", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: direct connections not specified!\n");
-            return 0;
-        }
-
-        direct = atoi(argv[i + 1]);
-
-        direct *= 1000000;
-        if (direct < 0)
-            direct = 0;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Direct connections: %dM\n",
-                    (int)(direct / 1000000));
-    }
-    //set order of direct connections
-    i = argPos((char *)"-direct-order", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: direct order not specified!\n");
-            return 0;
-        }
-
-        direct_order = atoi(argv[i + 1]);
-        if (direct_order > MAX_NGRAM_ORDER)
-            direct_order = MAX_NGRAM_ORDER;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Order of direct connections: %d\n", direct_order);
-    }
-    //set bptt
-    i = argPos((char *)"-bptt", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: bptt value not specified!\n");
-            return 0;
-        }
-
-        bptt = atoi(argv[i + 1]);
-        bptt++;
-        if (bptt < 1)
-            bptt = 1;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "BPTT: %d\n", bptt - 1);
-    }
-    //set bptt block
-    i = argPos((char *)"-bptt-block", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: bptt block value not specified!\n");
-            return 0;
-        }
-
-        bptt_block = atoi(argv[i + 1]);
-        if (bptt_block < 1)
-            bptt_block = 1;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "BPTT block: %d\n", bptt_block);
-    }
-    //set random seed
-    i = argPos((char *)"-rand-seed", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: Random seed variable not specified!\n");
-            return 0;
-        }
-
-        rand_seed = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Rand seed: %d\n", rand_seed);
-    }
-    //use other lm
-    i = argPos((char *)"-lm-prob", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: other lm file not specified!\n");
-            return 0;
-        }
-
-        strcpy(lmprob_file, argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "other lm probabilities specified in: %s\n",
-                    lmprob_file);
-
-        f = fopen(lmprob_file, "rb");
-        if (f == NULL) {
-            fprintf(stderr, "ERROR: other lm file not found!\n");
-            return 0;
-        }
-
-        use_lmprob = 1;
-    }
-    //search for binary option
-    i = argPos((char *)"-binary", argc, argv);
-    if (i > 0) {
-        if (debug_mode > 0)
-            fprintf(stderr, "Model will be saved in binary format\n");
-
-        fileformat = BINARY;
-    }
-    //search for rnnlm file
-    i = argPos((char *)"-rnnlm", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: model file not specified!\n");
-            return 0;
-        }
-
-        strcpy(rnnlm_file, argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "rnnlm file: %s\n", rnnlm_file);
-
-        f = fopen(rnnlm_file, "rb");
-
-        rnnlm_file_set = 1;
-    }
-    if (train_mode && !rnnlm_file_set) {
-        fprintf(stderr, "ERROR: rnnlm file must be specified for training!\n");
-        return 0;
-    }
-    if (test_data_set && !rnnlm_file_set) {
-        fprintf(stderr, "ERROR: rnnlm file must be specified for testing!\n");
-        return 0;
-    }
-    if (!test_data_set && !train_mode && gen == 0) {
-        fprintf(stderr, "ERROR: training or testing must be specified!\n");
-        return 0;
-    }
-    if ((gen > 0) && !rnnlm_file_set) {
-        fprintf(stderr,
-                "ERROR: rnnlm file must be specified to generate words!\n");
-        return 0;
+	    //todo: free bptt variables too
+	}
     }
 
-    srand(1);
+    real random(real min, real max);
 
-    if (train_mode) {
-        CRnnLM model1;
+    void setTrainFile(char *str);
+    void setValidFile(char *str);
+    void setTestFile(char *str);
+    void setRnnLMFile(char *str);
+    void setLMProbFile(char *str) {strcpy(lmprob_file, str);}
+    void setCompressFile(char *str) {strcpy(compress_file, str);}
 
-        model1.setTrainFile(train_file);
-        model1.setRnnLMFile(rnnlm_file);
-        model1.setFileType(fileformat);
+    void setFileType(int newt) {filetype=newt;}
 
-        model1.setOneIter(one_iter);
-        if (one_iter == 0)
-            model1.setValidFile(valid_file);
+    void setClassSize(int newSize) {class_size=newSize;}
+    void setOldClasses(int newVal) {old_classes=newVal;}
+    void setLambda(real newLambda) {lambda=newLambda;}
+    void setGradientCutoff(real newGradient) {gradient_cutoff=newGradient;}
+    void setDynamic(real newD) {dynamic=newD;}
+    void setGen(real newGen) {gen=newGen;}
+    void setIndependent(int newVal) {independent=newVal;}
 
-        model1.setClassSize(class_size);
-        model1.setOldClasses(old_classes);
-        model1.setLearningRate(starting_alpha);
-        model1.setGradientCutoff(gradient_cutoff);
-        model1.setRegularization(regularization);
-        model1.setMinImprovement(min_improvement);
-        model1.setHiddenLayerSize(hidden_size);
-        model1.setCompressionLayerSize(compression_size);
-        model1.setDirectSize(direct);
-        model1.setDirectOrder(direct_order);
-        model1.setBPTT(bptt);
-        model1.setBPTTBlock(bptt_block);
-        model1.setRandSeed(rand_seed);
-        model1.setDebugMode(debug_mode);
-        model1.setAntiKasparek(anti_k);
-        model1.setIndependent(independent);
+    void setLearningRate(real newAlpha) {alpha=newAlpha;}
+    void setRegularization(real newBeta) {beta=newBeta;}
+    void setMinImprovement(real newMinImprovement) {min_improvement=newMinImprovement;}
+    void setHiddenLayerSize(int newsize) {layer1_size=newsize;}
+    void setCompressionLayerSize(int newsize) {layerc_size=newsize;}
+    void setDirectSize(long long newsize) {direct_size=newsize;}
+    void setDirectOrder(int newsize) {direct_order=newsize;}
+    void setBPTT(int newval) {bptt=newval;}
+    void setBPTTBlock(int newval) {bptt_block=newval;}
+    void setRandSeed(int newSeed) {rand_seed=newSeed; srand(rand_seed);}
+    void setDebugMode(int newDebug) {debug_mode=newDebug;}
+    void setAntiKasparek(int newAnti) {anti_k=newAnti;}
+    void setOneIter(int newOneIter) {one_iter=newOneIter;}
+    void setNCluster(int newNCluster) {ncluster=newNCluster;}
+    void setKMean(int newKMeanIter) { kmean_iter=newKMeanIter; }
 
-        model1.alpha_set = alpha_set;
-        model1.train_file_set = train_file_set;
+    int getWordHash(char *word);
+    void readWord(char *word, FILE *fin);
+    int searchVocab(char *word);
+    int readWordIndex(FILE *fin);
+    int addWordToVocab(char *word);
+    void learnVocabFromTrainFile();		//train_file will be used to construct vocabulary
 
-        model1.trainNet();
-    }
+    void saveWeights();			//saves current weights and unit activations
+    void restoreWeights();		//restores current weights and unit activations from backup copy
+    //void saveWeights2();		//allows 2. copy to be stored, useful for dynamic rescoring of nbest lists
+    //void restoreWeights2();
+    void saveContext();
+    void restoreContext();
+    void saveContext2();
+    void restoreContext2();
+    void initNet();
+    void saveNet();
+    void goToDelimiter(int delim, FILE *fi);
+    void restoreNet();
+    void netFlush();
+    void netReset();    //will erase just hidden layer state + bptt history + maxent history (called at end of sentences in the independent mode)
 
-    if (test_data_set && rnnlm_file_set) {
-        CRnnLM model1;
+    void computeNet(int last_word, int word);
+    void learnNet(int last_word, int word);
+    void copyHiddenLayerToInput();
+    void trainNet();
+    void useLMProb(int use) {use_lmprob=use;}
+    void testNet();
+    void testNbest();
+    double testNetKMean();
+    void testGen();
+    void quantize();
+    void kmean();
 
-        model1.setLambda(lambda);
-        model1.setRegularization(regularization);
-        model1.setDynamic(dynamic);
-        model1.setTestFile(test_file);
-        model1.setRnnLMFile(rnnlm_file);
-        model1.setRandSeed(rand_seed);
-        model1.useLMProb(use_lmprob);
-        if (use_lmprob)
-            model1.setLMProbFile(lmprob_file);
-        model1.setDebugMode(debug_mode);
+    void matrixXvector(struct neuron *dest, struct neuron *srcvec, struct synapse *srcmatrix, int matrix_width, int from, int to, int from2, int to2, int type);
+};
 
-        if (nbest == 0) {
-            // FIXME this is an ugly hack!
-            if (ncluster != 0) {
-                model1.setNCluster(ncluster);
-                if (kmean_iter > 0)
-                    model1.setKMean(kmean_iter);
-                model1.setFileType(COMPRESSED);
-            }
-            model1.testNet();
-            if (compress_file[0] != 0) {
-                model1.setRnnLMFile(compress_file);
-                model1.saveNet();
-            }
-        } else
-            model1.testNbest();
-    }
-
-    if (gen > 0) {
-        CRnnLM model1;
-
-        model1.setRnnLMFile(rnnlm_file);
-        model1.setDebugMode(debug_mode);
-        model1.setRandSeed(rand_seed);
-        model1.setGen(gen);
-
-        model1.testGen();
-    }
-
-    return 0;
-}
+#endif

@@ -4,752 +4,2397 @@
 // Version 0.3g
 // (c) 2010-2012 Tomas Mikolov (tmikolov@gmail.com)
 // (c) 2013      Stefan Kombrink (katakombi@gmail.com)
-// Coding Style: indent rnnlm.cpp -linux -nut -o -ts4 -i4
 //
 ///////////////////////////////////////////////////////////////////////
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <fstream>
-#include <iostream>
+#include <time.h>
 #include "rnnlmlib.h"
 
-using namespace std;
+///// fast exp() implementation
+static union{
+    double d;
+    struct{
+        int j,i;
+        } n;
+} d2i;
+#define NUMCENTS (1<<ncluster)
 
-int argPos(char *str, int argc, char **argv)
+#define EXP_A (1048576/M_LN2)
+#define EXP_C 60801
+#define FAST_EXP(y) (d2i.n.i = EXP_A*(y)+(1072693248-EXP_C),d2i.d)
+
+#define READ_SYNCD(x) ( ( ((uint16_t*)(syn_cd+((x)*ncluster)/8))[0] >> ((x)*ncluster%8) ) & (((uint16_t)(1<<ncluster))-1) )
+#define WRITE_SYNCD(x,y) { uint16_t z = ((uint16_t*)(syn_cd+(((x)*ncluster)/8)))[0] &=~(((uint16_t)(1<<ncluster)-1)<<((x)*ncluster%8)); \
+                           ((uint16_t*)(syn_cd+(((x)*ncluster)/8)))[0]=z^(((uint16_t)(y))<<((x)*ncluster%8)); }
+
+real CRnnLM::random(real min, real max)
+{
+    return rand()/(real)RAND_MAX*(max-min)+min;
+}
+
+void CRnnLM::setTrainFile(char *str)
+{
+    strcpy(train_file, str);
+}
+
+void CRnnLM::setValidFile(char *str)
+{
+    strcpy(valid_file, str);
+}
+
+void CRnnLM::setTestFile(char *str)
+{
+    strcpy(test_file, str);
+}
+
+void CRnnLM::setRnnLMFile(char *str)
+{
+    strcpy(rnnlm_file, str);
+}
+
+
+
+
+void CRnnLM::readWord(char *word, FILE *fin)
+{
+    int a=0, ch;
+
+    while (!feof(fin)) {
+	ch=fgetc(fin);
+
+	if (ch==13) continue;
+
+	if ((ch==' ') || (ch=='\t') || (ch=='\n')) {
+    	    if (a>0) {
+                if (ch=='\n') ungetc(ch, fin);
+                break;
+            }
+
+            if (ch=='\n') {
+                strcpy(word, (char *)"</s>");
+                return;
+            }
+            else continue;
+        }
+
+        word[a]=ch;
+        a++;
+
+        if (a>=MAX_STRING) {
+            //printf("Too long word found!\n");   //truncate too long words
+            a--;
+        }
+    }
+    word[a]=0;
+}
+
+int CRnnLM::getWordHash(char *word)
+{
+    unsigned int hash, a;
+
+    hash=0;
+    for (a=0; a<strlen(word); a++) hash=hash*237+word[a];
+    hash=hash%vocab_hash_size;
+
+    return hash;
+}
+
+int CRnnLM::searchVocab(char *word)
+{
+    int a;
+    unsigned int hash;
+
+    hash=getWordHash(word);
+
+    if (vocab_hash[hash]==-1) return -1;
+    if (!strcmp(word, vocab[vocab_hash[hash]].word)) return vocab_hash[hash];
+
+    for (a=0; a<vocab_size; a++) {				//search in vocabulary
+        if (!strcmp(word, vocab[a].word)) {
+    	    vocab_hash[hash]=a;
+    	    return a;
+    	}
+    }
+
+    return -1;							//return OOV if not found
+}
+
+int CRnnLM::readWordIndex(FILE *fin)
+{
+    char word[MAX_STRING];
+
+    readWord(word, fin);
+    if (feof(fin)) return -1;
+
+    return searchVocab(word);
+}
+
+int CRnnLM::addWordToVocab(char *word)
+{
+    unsigned int hash;
+
+    strcpy(vocab[vocab_size].word, word);
+    vocab[vocab_size].cn=0;
+    vocab_size++;
+
+    if (vocab_size+2>=vocab_max_size) {        //reallocate memory if needed
+        vocab_max_size+=100;
+        vocab=(struct vocab_word *)realloc(vocab, vocab_max_size * sizeof(struct vocab_word));
+    }
+
+    hash=getWordHash(word);
+    vocab_hash[hash]=vocab_size-1;
+
+    return vocab_size-1;
+}
+
+void CRnnLM::sortVocab()
+{
+    int a, b, max;
+    vocab_word swap;
+
+    for (a=1; a<vocab_size; a++) {
+        max=a;
+        for (b=a+1; b<vocab_size; b++) if (vocab[max].cn<vocab[b].cn) max=b;
+
+        swap=vocab[max];
+        vocab[max]=vocab[a];
+        vocab[a]=swap;
+    }
+}
+
+void CRnnLM::learnVocabFromTrainFile()    //assumes that vocabulary is empty
+{
+    char word[MAX_STRING];
+    FILE *fin;
+    int a, i, train_wcn;
+
+    for (a=0; a<vocab_hash_size; a++) vocab_hash[a]=-1;
+
+    fin=fopen(train_file, "rb");
+
+    vocab_size=0;
+
+    addWordToVocab((char *)"</s>");
+
+    train_wcn=0;
+    while (1) {
+        readWord(word, fin);
+        if (feof(fin)) break;
+
+        train_wcn++;
+
+        i=searchVocab(word);
+        if (i==-1) {
+            a=addWordToVocab(word);
+            vocab[a].cn=1;
+        } else vocab[i].cn++;
+    }
+
+    sortVocab();
+
+    //select vocabulary size
+    /*a=0;
+    while (a<vocab_size) {
+	a++;
+	if (vocab[a].cn==0) break;
+    }
+    vocab_size=a;*/
+
+    if (debug_mode>0) {
+	fprintf(stderr,"Vocab size: %d\n", vocab_size);
+	fprintf(stderr,"Words in train file: %d\n", train_wcn);
+    }
+
+    train_words=train_wcn;
+
+    fclose(fin);
+}
+
+void CRnnLM::saveWeights()      //saves current weights and unit activations
+{
+    int a,b;
+
+    for (a=0; a<layer0_size; a++) {
+        neu0b[a].ac=neu0[a].ac;
+        neu0b[a].er=neu0[a].er;
+    }
+
+    for (a=0; a<layer1_size; a++) {
+        neu1b[a].ac=neu1[a].ac;
+        neu1b[a].er=neu1[a].er;
+    }
+
+    for (a=0; a<layerc_size; a++) {
+        neucb[a].ac=neuc[a].ac;
+        neucb[a].er=neuc[a].er;
+    }
+
+    for (a=0; a<layer2_size; a++) {
+        neu2b[a].ac=neu2[a].ac;
+        neu2b[a].er=neu2[a].er;
+    }
+
+    for (b=0; b<layer1_size; b++) for (a=0; a<layer0_size; a++) {
+	syn0b[a+b*layer0_size].weight=syn0[a+b*layer0_size].weight;
+    }
+
+    if (layerc_size>0) {
+	for (b=0; b<layerc_size; b++) for (a=0; a<layer1_size; a++) {
+	    syn1b[a+b*layer1_size].weight=syn1[a+b*layer1_size].weight;
+	}
+
+	for (b=0; b<layer2_size; b++) for (a=0; a<layerc_size; a++) {
+	    syncb[a+b*layerc_size].weight=sync[a+b*layerc_size].weight;
+	}
+    }
+    else {
+	for (b=0; b<layer2_size; b++) for (a=0; a<layer1_size; a++) {
+	    syn1b[a+b*layer1_size].weight=syn1[a+b*layer1_size].weight;
+	}
+    }
+
+    //for (a=0; a<direct_size; a++) syn_db[a].weight=syn_d[a].weight;
+}
+
+void CRnnLM::restoreWeights()      //restores current weights and unit activations from backup copy
+{
+    int a,b;
+
+    for (a=0; a<layer0_size; a++) {
+        neu0[a].ac=neu0b[a].ac;
+        neu0[a].er=neu0b[a].er;
+    }
+
+    for (a=0; a<layer1_size; a++) {
+        neu1[a].ac=neu1b[a].ac;
+        neu1[a].er=neu1b[a].er;
+    }
+
+    for (a=0; a<layerc_size; a++) {
+        neuc[a].ac=neucb[a].ac;
+        neuc[a].er=neucb[a].er;
+    }
+
+    for (a=0; a<layer2_size; a++) {
+        neu2[a].ac=neu2b[a].ac;
+        neu2[a].er=neu2b[a].er;
+    }
+
+    for (b=0; b<layer1_size; b++) for (a=0; a<layer0_size; a++) {
+        syn0[a+b*layer0_size].weight=syn0b[a+b*layer0_size].weight;
+    }
+
+    if (layerc_size>0) {
+	for (b=0; b<layerc_size; b++) for (a=0; a<layer1_size; a++) {
+	    syn1[a+b*layer1_size].weight=syn1b[a+b*layer1_size].weight;
+	}
+
+	for (b=0; b<layer2_size; b++) for (a=0; a<layerc_size; a++) {
+	    sync[a+b*layerc_size].weight=syncb[a+b*layerc_size].weight;
+	}
+    }
+    else {
+	for (b=0; b<layer2_size; b++) for (a=0; a<layer1_size; a++) {
+	    syn1[a+b*layer1_size].weight=syn1b[a+b*layer1_size].weight;
+	}
+    }
+
+    //for (a=0; a<direct_size; a++) syn_d[a].weight=syn_db[a].weight;
+}
+
+void CRnnLM::saveContext()		//useful for n-best list processing
 {
     int a;
 
-    for (a = 1; a < argc; a++)
-        if (!strcmp(str, argv[a]))
-            return a;
-
-    return -1;
+    for (a=0; a<layer1_size; a++) neu1b[a].ac=neu1[a].ac;
 }
 
-int main(int argc, char **argv)
+void CRnnLM::restoreContext()
 {
+    int a;
+
+    for (a=0; a<layer1_size; a++) neu1[a].ac=neu1b[a].ac;
+}
+
+void CRnnLM::saveContext2()
+{
+    int a;
+
+    for (a=0; a<layer1_size; a++) neu1b2[a].ac=neu1[a].ac;
+}
+
+void CRnnLM::restoreContext2()
+{
+    int a;
+
+    for (a=0; a<layer1_size; a++) neu1[a].ac=neu1b2[a].ac;
+}
+
+void CRnnLM::initNet()
+{
+    int a, b, cl;
+
+    layer0_size=vocab_size+layer1_size;
+    layer2_size=vocab_size+class_size;
+
+    neu0=(struct neuron *)calloc(layer0_size, sizeof(struct neuron));
+    neu1=(struct neuron *)calloc(layer1_size, sizeof(struct neuron));
+    neuc=(struct neuron *)calloc(layerc_size, sizeof(struct neuron));
+    neu2=(struct neuron *)calloc(layer2_size, sizeof(struct neuron));
+
+    syn0=(struct synapse *)calloc(layer0_size*layer1_size, sizeof(struct synapse));
+    if (layerc_size==0)
+	syn1=(struct synapse *)calloc(layer1_size*layer2_size, sizeof(struct synapse));
+    else {
+	syn1=(struct synapse *)calloc(layer1_size*layerc_size, sizeof(struct synapse));
+	sync=(struct synapse *)calloc(layerc_size*layer2_size, sizeof(struct synapse));
+    }
+
+    if (syn1==NULL) {
+	fprintf(stderr,"Memory allocation failed\n");
+	exit(1);
+    }
+
+    if (layerc_size>0) if (sync==NULL) {
+	fprintf(stderr,"Memory allocation failed\n");
+	exit(1);
+    }
+
+    if (filetype != COMPRESSED) syn_d=(direct_t *)calloc((long long)direct_size, sizeof(direct_t));
+
+    if ((syn_d==NULL)&&(filetype!=COMPRESSED)) {
+	fprintf(stderr,"Memory allocation for direct connections failed (requested %lld bytes)\n", (long long)direct_size * (long long)sizeof(direct_t));
+	exit(1);
+    }
+
+    neu0b=(struct neuron *)calloc(layer0_size, sizeof(struct neuron));
+    neu1b=(struct neuron *)calloc(layer1_size, sizeof(struct neuron));
+    neucb=(struct neuron *)calloc(layerc_size, sizeof(struct neuron));
+    neu1b2=(struct neuron *)calloc(layer1_size, sizeof(struct neuron));
+    neu2b=(struct neuron *)calloc(layer2_size, sizeof(struct neuron));
+
+    syn0b=(struct synapse *)calloc(layer0_size*layer1_size, sizeof(struct synapse));
+    //syn1b=(struct synapse *)calloc(layer1_size*layer2_size, sizeof(struct synapse));
+    if (layerc_size==0)
+	syn1b=(struct synapse *)calloc(layer1_size*layer2_size, sizeof(struct synapse));
+    else {
+	syn1b=(struct synapse *)calloc(layer1_size*layerc_size, sizeof(struct synapse));
+	syncb=(struct synapse *)calloc(layerc_size*layer2_size, sizeof(struct synapse));
+    }
+
+    if (syn1b==NULL) {
+	fprintf(stderr,"Memory allocation failed\n");
+	exit(1);
+    }
+
+    for (a=0; a<layer0_size; a++) {
+        neu0[a].ac=0;
+        neu0[a].er=0;
+    }
+
+    for (a=0; a<layer1_size; a++) {
+        neu1[a].ac=0;
+        neu1[a].er=0;
+    }
+
+    for (a=0; a<layerc_size; a++) {
+        neuc[a].ac=0;
+        neuc[a].er=0;
+    }
+
+    for (a=0; a<layer2_size; a++) {
+        neu2[a].ac=0;
+        neu2[a].er=0;
+    }
+
+    for (b=0; b<layer1_size; b++) for (a=0; a<layer0_size; a++) {
+        syn0[a+b*layer0_size].weight=random(-0.1, 0.1)+random(-0.1, 0.1)+random(-0.1, 0.1);
+    }
+
+    if (layerc_size>0) {
+	for (b=0; b<layerc_size; b++) for (a=0; a<layer1_size; a++) {
+	    syn1[a+b*layer1_size].weight=random(-0.1, 0.1)+random(-0.1, 0.1)+random(-0.1, 0.1);
+	}
+
+	for (b=0; b<layer2_size; b++) for (a=0; a<layerc_size; a++) {
+	    sync[a+b*layerc_size].weight=random(-0.1, 0.1)+random(-0.1, 0.1)+random(-0.1, 0.1);
+	}
+    }
+    else {
+	for (b=0; b<layer2_size; b++) for (a=0; a<layer1_size; a++) {
+	    syn1[a+b*layer1_size].weight=random(-0.1, 0.1)+random(-0.1, 0.1)+random(-0.1, 0.1);
+	}
+    }
+
+    long long aa;
+    if (syn_d) for (aa=0; aa<direct_size; aa++) syn_d[aa]=0;
+
+    if (bptt>0) {
+	bptt_history=(int *)calloc((bptt+bptt_block+10), sizeof(int));
+	for (a=0; a<bptt+bptt_block; a++) bptt_history[a]=-1;
+	//
+	bptt_hidden=(neuron *)calloc((bptt+bptt_block+1)*layer1_size, sizeof(neuron));
+	for (a=0; a<(bptt+bptt_block)*layer1_size; a++) {
+	    bptt_hidden[a].ac=0;
+	    bptt_hidden[a].er=0;
+	}
+	//
+	bptt_syn0=(struct synapse *)calloc(layer0_size*layer1_size, sizeof(struct synapse));
+	if (bptt_syn0==NULL) {
+	    fprintf(stderr,"Memory allocation failed\n");
+	    exit(1);
+	}
+    }
+
+    saveWeights();
+
+    double df, dd;
     int i;
 
-    int debug_mode = 1;
+    df=0;
+    dd=0;
+    a=0;
+    b=0;
 
-    int fileformat = TEXT;
-
-    int train_mode = 0;
-    int valid_data_set = 0;
-    int test_data_set = 0;
-    int rnnlm_file_set = 0;
-
-    int alpha_set = 0, train_file_set = 0;
-
-    int class_size = 100;
-    int old_classes = 0;
-    float lambda = 0.75;
-    float gradient_cutoff = 15;
-    float dynamic = 0;
-    float starting_alpha = 0.1;
-    float regularization = 0.0000001;
-    float min_improvement = 1.003;
-    int hidden_size = 30;
-    int compression_size = 0;
-    long long direct = 0;
-    int direct_order = 3;
-    int bptt = 0;
-    int bptt_block = 10;
-    int gen = 0;
-    int independent = 0;
-    int use_lmprob = 0;
-    int rand_seed = 1;
-    int nbest = 0;
-    int one_iter = 0;
-    int anti_k = 0;
-    int ncluster = 0;
-    int kmean_iter = -1;
-
-    char train_file[MAX_STRING];
-    char valid_file[MAX_STRING];
-    char test_file[MAX_STRING];
-    char rnnlm_file[MAX_STRING];
-    char compress_file[MAX_STRING];
-    char lmprob_file[MAX_STRING];
-
-    FILE *f;
-
-    compress_file[0] = 0;
-
-    if (argc == 1) {
-        //printf("Help\n");
-
-        fprintf(stdout,
-                "Recurrent neural network based language modeling toolkit v 0.3g\n\n");
-
-        fprintf(stdout, "Options:\n");
-
-        //
-        fprintf(stdout, "Parameters for training phase:\n");
-
-        fprintf(stdout, "\t-train <file>\n");
-        fprintf(stdout, "\t\tUse text data from <file> to train rnnlm model\n");
-
-        fprintf(stdout, "\t-class <int>\n");
-        fprintf(stdout,
-                "\t\tWill use specified amount of classes to decompose vocabulary; default is 100\n");
-
-        fprintf(stdout, "\t-old-classes\n");
-        fprintf(stdout,
-                "\t\tThis will use old algorithm to compute classes, which results in slower models but can be a bit more precise\n");
-
-        fprintf(stdout, "\t-rnnlm <file>\n");
-        fprintf(stdout, "\t\tUse <file> to store rnnlm model\n");
-
-        fprintf(stdout, "\t-binary\n");
-        fprintf(stdout,
-                "\t\tRnnlm model will be saved in binary format (default is plain text)\n");
-
-        fprintf(stdout, "\t-valid <file>\n");
-        fprintf(stdout, "\t\tUse <file> as validation data\n");
-
-        fprintf(stdout, "\t-alpha <float>\n");
-        fprintf(stdout, "\t\tSet starting learning rate; default is 0.1\n");
-
-        fprintf(stdout, "\t-beta <float>\n");
-        fprintf(stdout,
-                "\t\tSet L2 regularization parameter; default is 1e-7\n");
-
-        fprintf(stdout, "\t-hidden <int>\n");
-        fprintf(stdout, "\t\tSet size of hidden layer; default is 30\n");
-
-        fprintf(stdout, "\t-compression <int>\n");
-        fprintf(stdout,
-                "\t\tSet size of compression layer; default is 0 (not used)\n");
-
-        fprintf(stdout, "\t-direct <int>\n");
-        fprintf(stdout,
-                "\t\tSets size of the hash for direct connections with n-gram features in millions; default is 0\n");
-
-        fprintf(stdout, "\t-direct-order <int>\n");
-        fprintf(stdout,
-                "\t\tSets the n-gram order for direct connections (max %d); default is 3\n",
-                MAX_NGRAM_ORDER);
-
-        fprintf(stdout, "\t-bptt <int>\n");
-        fprintf(stdout,
-                "\t\tSet amount of steps to propagate error back in time; default is 0 (equal to simple RNN)\n");
-
-        fprintf(stdout, "\t-bptt-block <int>\n");
-        fprintf(stdout,
-                "\t\tSpecifies amount of time steps after which the error is backpropagated through time in block mode (default 10, update at each time step = 1)\n");
-
-        fprintf(stdout, "\t-one-iter\n");
-        fprintf(stdout,
-                "\t\tWill cause training to perform exactly one iteration over training data (useful for adapting final models on different data etc.)\n");
-
-        fprintf(stdout, "\t-anti-kasparek <int>\n");
-        fprintf(stdout,
-                "\t\tModel will be saved during training after processing specified amount of words\n");
-
-        fprintf(stdout, "\t-min-improvement <float>\n");
-        fprintf(stdout,
-                "\t\tSet minimal relative entropy improvement for training convergence; default is 1.003\n");
-
-        fprintf(stdout, "\t-gradient-cutoff <float>\n");
-        fprintf(stdout,
-                "\t\tSet maximal absolute gradient value (to improve training stability, use lower values; default is 15, to turn off use 0)\n");
-
-        fprintf(stdout, "\t-rand-seed <int>\n");
-        fprintf(stdout,
-                "\t\tSet the initialization value for the random number generator; use this to train complementary models\n");
-
-        //
-        fprintf(stdout, "Parameters for testing phase:\n");
-
-        fprintf(stdout, "\t-rnnlm <file>\n");
-        fprintf(stdout, "\t\tRead rnnlm model from <file>\n");
-
-        fprintf(stdout, "\t-test <file>\n");
-        fprintf(stdout, "\t\tUse <file> as test data to report perplexity\n");
-
-        fprintf(stdout, "\t-lm-prob\n");
-        fprintf(stdout,
-                "\t\tUse other LM probabilities for linear interpolation with rnnlm model; see examples at the rnnlm webpage\n");
-
-        fprintf(stdout, "\t-lambda <float>\n");
-        fprintf(stdout,
-                "\t\tSet parameter for linear interpolation of rnnlm and other lm; default weight of rnnlm is 0.75\n");
-
-        fprintf(stdout, "\t-dynamic <float>\n");
-        fprintf(stdout,
-                "\t\tSet learning rate for dynamic model updates during testing phase; default is 0 (static model)\n");
-
-        fprintf(stdout, "\t-compress <int>\n");
-        fprintf(stdout,
-                "\t\tCompress the ME part of an RNNME model (direct connections)\n");
-        fprintf(stdout,
-                "\t\tUse given number of bits for compression (between 3 and 8)\n");
-
-        fprintf(stdout, "\t-kmean <int>\n");
-        fprintf(stdout,
-                "\t\tImprove compression by given number of iterations of kmean clustering\n");
-
-        fprintf(stdout, "\t-write-compressed <file>\n");
-        fprintf(stdout, "\t\tWrite the compressed model to disk\n");
-
-        //
-
-        fprintf(stdout, "Additional parameters:\n");
-
-        fprintf(stdout, "\t-gen <int>\n");
-        fprintf(stdout,
-                "\t\tGenerate specified amount of words given distribution from current model\n");
-
-        fprintf(stdout, "\t-independent\n");
-        fprintf(stdout,
-                "\t\tWill erase history at end of each sentence (if used for training, this switch should be used also for testing & rescoring)\n");
-
-        fprintf(stdout, "\nExamples:\n");
-        fprintf(stdout,
-                "rnnlm -train train -rnnlm model -valid valid -hidden 50\n");
-        fprintf(stdout, "rnnlm -rnnlm model -test test\n");
-        fprintf(stdout, "rnnlm -rnnlm model -compress 4 -test test\n");
-        fprintf(stdout, "\n");
-
-        return 0;               //***
-    }
-    //set debug mode
-    i = argPos((char *)"-debug", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: debug mode not specified!\n");
-            return 0;
+    if (old_classes) {  	// old classes
+        for (i=0; i<vocab_size; i++) b+=vocab[i].cn;
+        for (i=0; i<vocab_size; i++) {
+            df+=vocab[i].cn/(double)b;
+            if (df>1) df=1;
+            if (df>(a+1)/(double)class_size) {
+    	        vocab[i].class_index=a;
+    	        if (a<class_size-1) a++;
+            } else {
+    	        vocab[i].class_index=a;
+            }
         }
-
-        debug_mode = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "debug mode: %d\n", debug_mode);
-    }
-    //search for train file
-    i = argPos((char *)"-train", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: training data file not specified!\n");
-            return 0;
-        }
-
-        strcpy(train_file, argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "train file: %s\n", train_file);
-
-        f = fopen(train_file, "rb");
-        if (f == NULL) {
-            fprintf(stderr, "ERROR: training data file not found!\n");
-            return 0;
-        }
-
-        train_mode = 1;
-
-        train_file_set = 1;
-    }
-    //set one-iter
-    i = argPos((char *)"-one-iter", argc, argv);
-    if (i > 0) {
-        one_iter = 1;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Training for one iteration\n");
-    }
-    //search for validation file
-    i = argPos((char *)"-valid", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: validation data file not specified!\n");
-            return 0;
-        }
-
-        strcpy(valid_file, argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "valid file: %s\n", valid_file);
-
-        f = fopen(valid_file, "rb");
-        if (f == NULL) {
-            fprintf(stderr, "ERROR: validation data file not found!\n");
-            return 0;
-        }
-
-        valid_data_set = 1;
+    } else {			// new classes
+        for (i=0; i<vocab_size; i++) b+=vocab[i].cn;
+        for (i=0; i<vocab_size; i++) dd+=sqrt(vocab[i].cn/(double)b);
+        for (i=0; i<vocab_size; i++) {
+	    df+=sqrt(vocab[i].cn/(double)b)/dd;
+            if (df>1) df=1;
+            if (df>(a+1)/(double)class_size) {
+    	        vocab[i].class_index=a;
+    	        if (a<class_size-1) a++;
+            } else {
+    	        vocab[i].class_index=a;
+            }
+	}
     }
 
-    if (train_mode && !valid_data_set) {
-        if (one_iter == 0) {
-            fprintf(stderr,
-                    "ERROR: validation data file must be specified for training!\n");
-            return 0;
+    //allocate auxiliary class variables (for faster search when normalizing probability at output layer)
+
+    class_words=(int **)calloc(class_size, sizeof(int *));
+    class_cn=(int *)calloc(class_size, sizeof(int));
+    class_max_cn=(int *)calloc(class_size, sizeof(int));
+
+    for (i=0; i<class_size; i++) {
+	class_cn[i]=0;
+	class_max_cn[i]=10;
+	class_words[i]=(int *)calloc(class_max_cn[i], sizeof(int));
+    }
+
+    for (i=0; i<vocab_size; i++) {
+	cl=vocab[i].class_index;
+	class_words[cl][class_cn[cl]]=i;
+	class_cn[cl]++;
+	if (class_cn[cl]+2>=class_max_cn[cl]) {
+	    class_max_cn[cl]+=10;
+	    class_words[cl]=(int *)realloc(class_words[cl], class_max_cn[cl]*sizeof(int));
+	}
+    }
+}
+
+void CRnnLM::saveNet()       //will save the whole network structure
+{
+    FILE *fo;
+    int a, b;
+    char str[1000];
+    float fl;
+
+    sprintf(str, "%s.temp", rnnlm_file);
+
+    fo=fopen(str, "wb");
+    if (fo==NULL) {
+        fprintf(stderr,"Cannot create file %s\n", rnnlm_file);
+        exit(1);
+    }
+    fprintf(fo, "version: %d\n", version);
+    fprintf(fo, "file format: %d\n\n", filetype);
+
+    fprintf(fo, "training data file: %s\n", train_file);
+    fprintf(fo, "validation data file: %s\n\n", valid_file);
+
+    fprintf(fo, "last probability of validation data: %f\n", llogp);
+    fprintf(fo, "number of finished iterations: %d\n", iter);
+
+    fprintf(fo, "current position in training data: %d\n", train_cur_pos);
+    fprintf(fo, "current probability of training data: %f\n", logp);
+    fprintf(fo, "save after processing # words: %d\n", anti_k);
+    fprintf(fo, "# of training words: %d\n", train_words);
+
+    fprintf(fo, "input layer size: %d\n", layer0_size);
+    fprintf(fo, "hidden layer size: %d\n", layer1_size);
+    fprintf(fo, "compression layer size: %d\n", layerc_size);
+    fprintf(fo, "output layer size: %d\n", layer2_size);
+
+    fprintf(fo, "direct connections: %lld\n", direct_size);
+    fprintf(fo, "direct order: %d\n", direct_order);
+
+    fprintf(fo, "bptt: %d\n", bptt);
+    fprintf(fo, "bptt block: %d\n", bptt_block);
+
+    fprintf(fo, "vocabulary size: %d\n", vocab_size);
+    fprintf(fo, "class size: %d\n", class_size);
+
+    fprintf(fo, "old classes: %d\n", old_classes);
+    fprintf(fo, "independent sentences mode: %d\n", independent);
+
+    fprintf(fo, "starting learning rate: %f\n", starting_alpha);
+    fprintf(fo, "current learning rate: %f\n", alpha);
+    fprintf(fo, "learning rate decrease: %d\n", alpha_divide);
+    fprintf(fo, "\n");
+
+    fprintf(fo, "\nVocabulary:\n");
+    for (a=0; a<vocab_size; a++) fprintf(fo, "%6d\t%10d\t%s\t%d\n", a, vocab[a].cn, vocab[a].word, vocab[a].class_index);
+
+
+    if (filetype==TEXT) {
+	fprintf(fo, "\nHidden layer activation:\n");
+	for (a=0; a<layer1_size; a++) fprintf(fo, "%.4f\n", neu1[a].ac);
+    }
+    if ((filetype==BINARY)||(filetype==COMPRESSED)) {
+    	for (a=0; a<layer1_size; a++) {
+    	    fl=neu1[a].ac;
+    	    fwrite(&fl, 4, 1, fo);
+    	}
+    }
+
+    //////////
+    if (filetype==TEXT) {
+	fprintf(fo, "\nWeights 0->1:\n");
+	for (b=0; b<layer1_size; b++) {
+    	    for (a=0; a<layer0_size; a++) {
+        	fprintf(fo, "%.4f\n", syn0[a+b*layer0_size].weight);
+    	    }
+	}
+    }
+    if ((filetype==BINARY)||(filetype==COMPRESSED)) {
+	for (b=0; b<layer1_size; b++) {
+    	    for (a=0; a<layer0_size; a++) {
+    		fl=syn0[a+b*layer0_size].weight;
+    		fwrite(&fl, 4, 1, fo);
+    	    }
+	}
+    }
+    /////////
+    if (filetype==TEXT) {
+	if (layerc_size>0) {
+	    fprintf(fo, "\n\nWeights 1->c:\n");
+	    for (b=0; b<layerc_size; b++) {
+		for (a=0; a<layer1_size; a++) {
+    		    fprintf(fo, "%.4f\n", syn1[a+b*layer1_size].weight);
+    		}
+    	    }
+
+    	    fprintf(fo, "\n\nWeights c->2:\n");
+	    for (b=0; b<layer2_size; b++) {
+		for (a=0; a<layerc_size; a++) {
+    		    fprintf(fo, "%.4f\n", sync[a+b*layerc_size].weight);
+    		}
+    	    }
+	}
+	else
+	{
+	    fprintf(fo, "\n\nWeights 1->2:\n");
+	    for (b=0; b<layer2_size; b++) {
+		for (a=0; a<layer1_size; a++) {
+    		    fprintf(fo, "%.4f\n", syn1[a+b*layer1_size].weight);
+    		}
+    	    }
+    	}
+    }
+    if ((filetype==BINARY)||(filetype==COMPRESSED)) {
+	if (layerc_size>0) {
+	    for (b=0; b<layerc_size; b++) {
+		for (a=0; a<layer1_size; a++) {
+		    fl=syn1[a+b*layer1_size].weight;
+    		    fwrite(&fl, 4, 1, fo);
+    		}
+    	    }
+
+	    for (b=0; b<layer2_size; b++) {
+		for (a=0; a<layerc_size; a++) {
+    		    fl=sync[a+b*layerc_size].weight;
+    		    fwrite(&fl, 4, 1, fo);
+    		}
+    	    }
+	}
+	else
+	{
+	    for (b=0; b<layer2_size; b++) {
+		for (a=0; a<layer1_size; a++) {
+    		    fl=syn1[a+b*layer1_size].weight;
+    		    fwrite(&fl, 4, 1, fo);
+    		}
+    	    }
+    	}
+    }
+    ////////
+    if (filetype==TEXT) {
+	fprintf(fo, "\nDirect connections:\n");
+	long long aa;
+	for (aa=0; aa<direct_size; aa++) {
+    	    fprintf(fo, "%.2f\n", syn_d[aa]);
+	}
+    }
+    if (filetype==BINARY) {
+	long long aa;
+	for (aa=0; aa<direct_size; aa++) {
+    	    fl=syn_d[aa];
+    	    fwrite(&fl, 4, 1, fo);
+	}
+    }
+    if (filetype==COMPRESSED) {
+        fwrite(&ncluster, sizeof(ncluster), 1, fo);
+        long long aa;
+        for (aa=0; aa<NUMCENTS; aa++) {
+            fwrite(&(centroid[aa]), sizeof(direct_t), 1, fo);
+        }
+        for (aa=0; aa<(direct_size*ncluster)/8+2; aa++) {
+            fwrite(&(syn_cd[aa]), sizeof(uint8_t), 1, fo);
         }
     }
-    //set nbest rescoring mode
-    i = argPos((char *)"-nbest", argc, argv);
-    if (i > 0) {
-        nbest = 1;
-        if (debug_mode > 0)
-            fprintf(stderr, "Processing test data as list of nbests\n");
+    ////////
+    fclose(fo);
+
+    rename(str, rnnlm_file);
+}
+
+void CRnnLM::goToDelimiter(int delim, FILE *fi)
+{
+    int ch=0;
+
+    while (ch!=delim) {
+        ch=fgetc(fi);
+        if (feof(fi)) {
+            fprintf(stderr,"Unexpected end of file\n");
+            exit(1);
+        }
     }
-    //search for test file
-    i = argPos((char *)"-test", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: test data file not specified!\n");
-            return 0;
+}
+
+void CRnnLM::restoreNet()    //will read whole network structure
+{
+    FILE *fi;
+    int a, b, ver;
+    float fl;
+    char str[MAX_STRING];
+    double d;
+
+    fi=fopen(rnnlm_file, "rb");
+    if (fi==NULL) {
+	fprintf(stderr,"ERROR: model file '%s' not found!\n", rnnlm_file);
+	exit(1);
+    }
+
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &ver);
+    if ((ver==4) && (version==5)) /* we will solve this later.. */ ; else
+    if (ver!=version) {
+        fprintf(stderr,"Unknown version of file %s\n", rnnlm_file);
+        exit(1);
+    }
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &filetype);
+    //
+    goToDelimiter(':', fi);
+    if (train_file_set==0) {
+	fscanf(fi, "%s", train_file);
+    } else fscanf(fi, "%s", str);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%s", valid_file);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%lf", &llogp);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &iter);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &train_cur_pos);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%lf", &logp);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &anti_k);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &train_words);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &layer0_size);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &layer1_size);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &layerc_size);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &layer2_size);
+    //
+    if (ver>5) {
+	goToDelimiter(':', fi);
+	fscanf(fi, "%lld", &direct_size);
+    }
+    //
+    if (ver>6) {
+	goToDelimiter(':', fi);
+	fscanf(fi, "%d", &direct_order);
+    }
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &bptt);
+    //
+    if (ver>4) {
+	goToDelimiter(':', fi);
+	fscanf(fi, "%d", &bptt_block);
+    } else bptt_block=10;
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &vocab_size);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &class_size);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &old_classes);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &independent);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%lf", &d);
+    starting_alpha=d;
+    //
+    goToDelimiter(':', fi);
+    if (alpha_set==0) {
+	fscanf(fi, "%lf", &d);
+	alpha=d;
+    } else fscanf(fi, "%lf", &d);
+    //
+    goToDelimiter(':', fi);
+    fscanf(fi, "%d", &alpha_divide);
+    //
+
+
+    //read normal vocabulary
+    if (vocab_max_size<vocab_size) {
+	if (vocab!=NULL) free(vocab);
+        vocab_max_size=vocab_size+1000;
+        vocab=(struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));    //initialize memory for vocabulary
+    }
+    //
+    goToDelimiter(':', fi);
+    for (a=0; a<vocab_size; a++) {
+	//fscanf(fi, "%d%d%s%d", &b, &vocab[a].cn, vocab[a].word, &vocab[a].class_index);
+	fscanf(fi, "%d%d", &b, &vocab[a].cn);
+	readWord(vocab[a].word, fi);
+	fscanf(fi, "%d", &vocab[a].class_index);
+	//printf("%d  %d  %s  %d\n", b, vocab[a].cn, vocab[a].word, vocab[a].class_index);
+    }
+    //
+    if (neu0==NULL) initNet();		//memory allocation here
+    //
+
+
+    if (filetype==TEXT) {
+	goToDelimiter(':', fi);
+	for (a=0; a<layer1_size; a++) {
+	    fscanf(fi, "%lf", &d);
+	    neu1[a].ac=d;
+	}
+    }
+    if ((filetype==BINARY)||(filetype==COMPRESSED)) {
+	fgetc(fi);
+	for (a=0; a<layer1_size; a++) {
+	    fread(&fl, 4, 1, fi);
+	    neu1[a].ac=fl;
+	}
+    }
+    //
+    if (filetype==TEXT) {
+	goToDelimiter(':', fi);
+	for (b=0; b<layer1_size; b++) {
+    	    for (a=0; a<layer0_size; a++) {
+		fscanf(fi, "%lf", &d);
+		syn0[a+b*layer0_size].weight=d;
+	    }
+	}
+    }
+    if (filetype==BINARY||filetype==COMPRESSED) {
+	for (b=0; b<layer1_size; b++) {
+    	    for (a=0; a<layer0_size; a++) {
+    		fread(&fl, 4, 1, fi);
+		syn0[a+b*layer0_size].weight=fl;
+    	    }
+	}
+    }
+    //
+    if (filetype==TEXT) {
+	goToDelimiter(':', fi);
+	if (layerc_size==0) {	//no compress layer
+	    for (b=0; b<layer2_size; b++) {
+    		for (a=0; a<layer1_size; a++) {
+		    fscanf(fi, "%lf", &d);
+		    syn1[a+b*layer1_size].weight=d;
+		}
+    	    }
+	}
+	else
+	{				//with compress layer
+	    for (b=0; b<layerc_size; b++) {
+    		for (a=0; a<layer1_size; a++) {
+		    fscanf(fi, "%lf", &d);
+		    syn1[a+b*layer1_size].weight=d;
+		}
+    	    }
+
+    	    goToDelimiter(':', fi);
+
+    	    for (b=0; b<layer2_size; b++) {
+    		for (a=0; a<layerc_size; a++) {
+		    fscanf(fi, "%lf", &d);
+		    sync[a+b*layerc_size].weight=d;
+		}
+    	    }
+	}
+    }
+    if (filetype==BINARY||filetype==COMPRESSED) {
+	if (layerc_size==0) {	//no compress layer
+	    for (b=0; b<layer2_size; b++) {
+    		for (a=0; a<layer1_size; a++) {
+    		    fread(&fl, 4, 1, fi);
+		    syn1[a+b*layer1_size].weight=fl;
+    		}
+    	    }
+	}
+	else
+	{				//with compress layer
+	    for (b=0; b<layerc_size; b++) {
+    		for (a=0; a<layer1_size; a++) {
+    		    fread(&fl, 4, 1, fi);
+		    syn1[a+b*layer1_size].weight=fl;
+    		}
+    	    }
+
+    	    for (b=0; b<layer2_size; b++) {
+    		for (a=0; a<layerc_size; a++) {
+    		    fread(&fl, 4, 1, fi);
+		    sync[a+b*layerc_size].weight=fl;
+    		}
+    	    }
+	}
+    }
+    //
+    if (filetype==TEXT) {
+	goToDelimiter(':', fi);		//direct conenctions
+	long long aa;
+    	for (aa=0; aa<direct_size; aa++) {
+	    fscanf(fi, "%lf", &d);
+	    syn_d[aa]=d;
+	}
+    }
+    //
+    if (filetype==BINARY) {
+	long long aa;
+    	for (aa=0; aa<direct_size; aa++) {
+    	    fread(&fl, 4, 1, fi);
+	    syn_d[aa]=fl;
+    	}
+    }
+
+    if (filetype==COMPRESSED){
+        fread(&ncluster, sizeof(ncluster), 1, fi);
+        long long aa;
+
+        centroid=(direct_t*)calloc(sizeof(direct_t),NUMCENTS);
+
+        for (aa=0;aa<NUMCENTS;aa++)
+        {
+            fread(&(centroid[aa]), sizeof(direct_t), 1, fi);
         }
 
-        strcpy(test_file, argv[i + 1]);
+        syn_cd=(uint8_t *)calloc((long long)((direct_size*ncluster)/8+2), sizeof(uint8_t));
 
-        if (debug_mode > 0)
-            fprintf(stderr, "test file: %s\n", test_file);
+        for (aa=0; aa<(direct_size*ncluster)/8+2; aa++) {
+            fread(&(syn_cd[aa]), sizeof(uint8_t), 1, fi);
+        }
+    }
 
-        if (nbest && (!strcmp(test_file, "-"))) ;
-        else {
-            f = fopen(test_file, "rb");
-            if (f == NULL) {
-                fprintf(stderr, "ERROR: test data file not found!\n");
-                return 0;
+    saveWeights();
+
+    fclose(fi);
+
+    // if model not already compressed and clustering is requested
+    // quantize and kmean
+    if ((ncluster>0)&&(filetype!=COMPRESSED)){
+      quantize();
+      if (kmean_iter!=-1) kmean();
+    }
+}
+
+int compare(const void *x, const void *y)
+{
+  if (*(double*)x == *(double*)y) return 0;
+  if (*(double*)x < *(double*)y) return -1;
+  return 1;
+}
+
+#define OBJFN(i,j) FAST_EXP((double)(fabs(centroid[j]-syn_d[i])))
+
+void CRnnLM::kmean()
+{
+  fprintf(stderr,"Running kmean for optimizing centroids...\n");
+  double err, ppl, bestppl=9999999999;
+
+  int* counts=(int*)calloc(sizeof(int),NUMCENTS);
+  direct_t* tempcent=(direct_t*)calloc(sizeof(direct_t),NUMCENTS);
+  direct_t* bestcent=(direct_t*)calloc(sizeof(direct_t),NUMCENTS);
+
+  long long i;
+  int j,ix,iter=1,bestiter=0;
+  do
+  {
+    err=0;
+
+    // update centroids
+    for (i=0;i<NUMCENTS;i++) centroid[i]=counts[i]? tempcent[i]/counts[i] : centroid[i];
+
+    // sort centroid values
+    qsort (centroid, NUMCENTS, sizeof(direct_t), compare);
+    for (i=0;i<NUMCENTS;i++) fprintf(stderr,"%2.3g ",centroid[i]);
+
+    // clear temp clusters + counts
+    for (i=0;i<NUMCENTS;i++){
+      tempcent[i]=counts[i]=0;
+    }
+
+    // identify closest cluster
+    //stepsize = direct_size/1000000+1;
+    for (i=0,ix=0;i<direct_size;i++)
+    {
+      double min_distance = 999999999999;
+      for (j=0;j<NUMCENTS;j++) {
+        double d = FAST_EXP((double)(fabs(centroid[j]-syn_d[i])));
+        if (d<min_distance){
+          min_distance=d;
+          ix=j;
+        }
+      }
+      counts[ix]++;
+      tempcent[ix]+=syn_d[i];
+      WRITE_SYNCD(i,ix); // update compressed direct connections
+      err+=min_distance;
+    }
+    
+    //fprintf(stderr,"Improving %f\n",olderr-err);
+    //fprintf(stderr,"Avg Error: %f\n",err/direct_size);
+    //fprintf(stderr,"Tot Error: %f\n",err);
+
+    ppl=testNetKMean();
+    if (ppl<bestppl) {
+      bestiter=iter;
+      bestppl=ppl;
+      for (j=0;j<NUMCENTS;j++) bestcent[j]=centroid[j];
+    }
+    fprintf(stderr,"\n\nIter: %d\n",iter);
+    fprintf(stderr,"Perplexity: %4.2f\n",ppl);
+    fprintf(stderr,"Best iteration: %d Perplexity: %4.2f\n\n",bestiter,bestppl);
+
+    iter++;
+  } while (iter<=kmean_iter);
+  fprintf(stderr,"Done!\n");
+
+  free(counts); free(tempcent);
+
+  for (i=0,ix=0;i<direct_size;i++)
+  {
+    double min_distance = 999999999999;
+    for (j=0;j<NUMCENTS;j++) {
+      double d = FAST_EXP((double)(fabs(bestcent[j]-syn_d[i])));
+      if (d<min_distance){
+        min_distance=d;
+        ix=j;
+      }
+    }
+    WRITE_SYNCD(i,ix); // update compressed direct connections
+  }
+  for (i=0;i<NUMCENTS;i++){
+      centroid[i]=bestcent[i];
+    }
+
+  free(bestcent);
+}
+
+void CRnnLM::quantize()
+{
+  long long i;
+
+  // determine min and max
+  float min= 9999999;
+  float max=-9999999;
+  int n=0;
+  for (int a=0;a<direct_size;a++)
+  {
+    if (min>syn_d[a]) min=syn_d[a];
+    if (max<syn_d[a]) max=syn_d[a];
+    if (syn_d[a]==0) n++;
+  }
+  //fprintf(stderr,"Ratio of zeros: %g\n",((double)n)/direct_size);
+
+  if (!syn_cd) syn_cd=(uint8_t *)calloc((long long)((direct_size*ncluster)/8+2), sizeof(uint8_t));
+
+  centroid=(direct_t*)calloc(sizeof(direct_t),NUMCENTS);
+
+  // distribute centroids linearly across whole dynamic range
+  for (int i=0;i<NUMCENTS;i++) {
+    centroid[i]=min+(max-min)*i/(NUMCENTS-1);
+  //  fprintf(stderr,"%g ",centroid[i]);
+  }
+  
+  // quantize compressed direct connections
+  for (i=0;i<direct_size;i++)
+  {
+    int ix=(int)((syn_d[i]-min)/(max-min)*(NUMCENTS-1)-0.5);
+    if (ix<0) ix=0;
+    if (ix>255) ix=255;
+    WRITE_SYNCD(i,ix);
+  }
+  fprintf(stderr,"Model compressed with %d Bits/weight\n",ncluster);
+  setFileType(COMPRESSED);
+  //fprintf(stderr,"Perplexity: %4.2f\n",testNetKMean());
+}
+
+void CRnnLM::netFlush()   //cleans all activations and error vectors
+{
+    int a;
+
+    for (a=0; a<layer0_size-layer1_size; a++) {
+        neu0[a].ac=0;
+        neu0[a].er=0;
+    }
+
+    for (a=layer0_size-layer1_size; a<layer0_size; a++) {   //last hidden layer is initialized to vector of 0.1 values to prevent unstability
+        neu0[a].ac=0.1;
+        neu0[a].er=0;
+    }
+
+    for (a=0; a<layer1_size; a++) {
+        neu1[a].ac=0;
+        neu1[a].er=0;
+    }
+
+    for (a=0; a<layerc_size; a++) {
+        neuc[a].ac=0;
+        neuc[a].er=0;
+    }
+
+    for (a=0; a<layer2_size; a++) {
+        neu2[a].ac=0;
+        neu2[a].er=0;
+    }
+}
+
+void CRnnLM::netReset()   //cleans hidden layer activation + bptt history
+{
+    int a, b;
+
+    for (a=0; a<layer1_size; a++) {
+        neu1[a].ac=1.0;
+    }
+
+    copyHiddenLayerToInput();
+
+    if (bptt>0) {
+        for (a=1; a<bptt+bptt_block; a++) bptt_history[a]=0;
+        for (a=bptt+bptt_block-1; a>1; a--) for (b=0; b<layer1_size; b++) {
+            bptt_hidden[a*layer1_size+b].ac=0;
+            bptt_hidden[a*layer1_size+b].er=0;
+        }
+    }
+
+    for (a=0; a<MAX_NGRAM_ORDER; a++) history[a]=0;
+}
+
+void CRnnLM::matrixXvector(struct neuron *dest, struct neuron *srcvec, struct synapse *srcmatrix, int matrix_width, int from, int to, int from2, int to2, int type)
+{
+    int a, b;
+    real val1, val2, val3, val4;
+    real val5, val6, val7, val8;
+
+    if (type==0) {		//ac mod
+	for (b=0; b<(to-from)/8; b++) {
+	    val1=0;
+	    val2=0;
+	    val3=0;
+	    val4=0;
+
+	    val5=0;
+	    val6=0;
+	    val7=0;
+	    val8=0;
+
+	    for (a=from2; a<to2; a++) {
+    		val1 += srcvec[a].ac * srcmatrix[a+(b*8+from+0)*matrix_width].weight;
+    		val2 += srcvec[a].ac * srcmatrix[a+(b*8+from+1)*matrix_width].weight;
+    		val3 += srcvec[a].ac * srcmatrix[a+(b*8+from+2)*matrix_width].weight;
+    		val4 += srcvec[a].ac * srcmatrix[a+(b*8+from+3)*matrix_width].weight;
+
+    		val5 += srcvec[a].ac * srcmatrix[a+(b*8+from+4)*matrix_width].weight;
+    		val6 += srcvec[a].ac * srcmatrix[a+(b*8+from+5)*matrix_width].weight;
+    		val7 += srcvec[a].ac * srcmatrix[a+(b*8+from+6)*matrix_width].weight;
+    		val8 += srcvec[a].ac * srcmatrix[a+(b*8+from+7)*matrix_width].weight;
+    	    }
+    	    dest[b*8+from+0].ac += val1;
+    	    dest[b*8+from+1].ac += val2;
+    	    dest[b*8+from+2].ac += val3;
+    	    dest[b*8+from+3].ac += val4;
+
+    	    dest[b*8+from+4].ac += val5;
+    	    dest[b*8+from+5].ac += val6;
+    	    dest[b*8+from+6].ac += val7;
+    	    dest[b*8+from+7].ac += val8;
+	}
+
+	for (b=b*8; b<to-from; b++) {
+	    for (a=from2; a<to2; a++) {
+    		dest[b+from].ac += srcvec[a].ac * srcmatrix[a+(b+from)*matrix_width].weight;
+    	    }
+    	}
+    }
+    else {		//er mod
+    	for (a=0; a<(to2-from2)/8; a++) {
+	    val1=0;
+	    val2=0;
+	    val3=0;
+	    val4=0;
+
+	    val5=0;
+	    val6=0;
+	    val7=0;
+	    val8=0;
+
+	    for (b=from; b<to; b++) {
+    	        val1 += srcvec[b].er * srcmatrix[a*8+from2+0+b*matrix_width].weight;
+    	        val2 += srcvec[b].er * srcmatrix[a*8+from2+1+b*matrix_width].weight;
+    	        val3 += srcvec[b].er * srcmatrix[a*8+from2+2+b*matrix_width].weight;
+    	        val4 += srcvec[b].er * srcmatrix[a*8+from2+3+b*matrix_width].weight;
+
+    	        val5 += srcvec[b].er * srcmatrix[a*8+from2+4+b*matrix_width].weight;
+    	        val6 += srcvec[b].er * srcmatrix[a*8+from2+5+b*matrix_width].weight;
+    	        val7 += srcvec[b].er * srcmatrix[a*8+from2+6+b*matrix_width].weight;
+    	        val8 += srcvec[b].er * srcmatrix[a*8+from2+7+b*matrix_width].weight;
+    	    }
+    	    dest[a*8+from2+0].er += val1;
+    	    dest[a*8+from2+1].er += val2;
+    	    dest[a*8+from2+2].er += val3;
+    	    dest[a*8+from2+3].er += val4;
+
+    	    dest[a*8+from2+4].er += val5;
+    	    dest[a*8+from2+5].er += val6;
+    	    dest[a*8+from2+6].er += val7;
+    	    dest[a*8+from2+7].er += val8;
+	}
+
+	for (a=a*8; a<to2-from2; a++) {
+	    for (b=from; b<to; b++) {
+    		dest[a+from2].er += srcvec[b].er * srcmatrix[a+from2+b*matrix_width].weight;
+    	    }
+    	}
+
+    	if (gradient_cutoff>0)
+    	for (a=from2; a<to2; a++) {
+    	    if (dest[a].er>gradient_cutoff) dest[a].er=gradient_cutoff;
+    	    if (dest[a].er<-gradient_cutoff) dest[a].er=-gradient_cutoff;
+    	}
+    }
+
+    //this is normal implementation (about 3x slower):
+
+    /*if (type==0) {		//ac mod
+	for (b=from; b<to; b++) {
+	    for (a=from2; a<to2; a++) {
+    		dest[b].ac += srcvec[a].ac * srcmatrix[a+b*matrix_width].weight;
+    	    }
+	}
+    }
+    else 		//er mod
+    if (type==1) {
+	for (a=from2; a<to2; a++) {
+	    for (b=from; b<to; b++) {
+    		dest[a].er += srcvec[b].er * srcmatrix[a+b*matrix_width].weight;
+    	    }
+    	}
+    }*/
+}
+
+void CRnnLM::computeNet(int last_word, int word)
+{
+    int a, b, c;
+    real val;
+    double sum;   //sum is used for normalization: it's better to have larger precision as many numbers are summed together here
+
+    if (last_word!=-1) neu0[last_word].ac=1;
+
+    //propagate 0->1
+    for (a=0; a<layer1_size; a++) neu1[a].ac=0;
+    for (a=0; a<layerc_size; a++) neuc[a].ac=0;
+
+    matrixXvector(neu1, neu0, syn0, layer0_size, 0, layer1_size, layer0_size-layer1_size, layer0_size, 0);
+
+    for (b=0; b<layer1_size; b++) {
+        a=last_word;
+        if (a!=-1) neu1[b].ac += neu0[a].ac * syn0[a+b*layer0_size].weight;
+    }
+
+    //activate 1      --sigmoid
+    for (a=0; a<layer1_size; a++) {
+	if (neu1[a].ac>50) neu1[a].ac=50;  //for numerical stability
+        if (neu1[a].ac<-50) neu1[a].ac=-50;  //for numerical stability
+        val=-neu1[a].ac;
+        neu1[a].ac=1/(1+FAST_EXP(val));
+    }
+
+    if (layerc_size>0) {
+	matrixXvector(neuc, neu1, syn1, layer1_size, 0, layerc_size, 0, layer1_size, 0);
+	//activate compression      --sigmoid
+	for (a=0; a<layerc_size; a++) {
+	    if (neuc[a].ac>50) neuc[a].ac=50;  //for numerical stability
+    	    if (neuc[a].ac<-50) neuc[a].ac=-50;  //for numerical stability
+    	    val=-neuc[a].ac;
+    	    neuc[a].ac=1/(1+FAST_EXP(val));
+	}
+    }
+
+    //1->2 class
+    for (b=vocab_size; b<layer2_size; b++) neu2[b].ac=0;
+
+    if (layerc_size>0) {
+	matrixXvector(neu2, neuc, sync, layerc_size, vocab_size, layer2_size, 0, layerc_size, 0);
+    }
+    else
+    {
+	matrixXvector(neu2, neu1, syn1, layer1_size, vocab_size, layer2_size, 0, layer1_size, 0);
+    }
+
+    //apply direct connections to classes
+    if (direct_size>0) {
+	unsigned long long hash[MAX_NGRAM_ORDER];	//this will hold pointers to syn_d that contains hash parameters
+
+	for (a=0; a<direct_order; a++) hash[a]=0;
+
+	for (a=0; a<direct_order; a++) {
+	    b=0;
+	    if (a>0) if (history[a-1]==-1) break;	//if OOV was in history, do not use this N-gram feature and higher orders
+	    hash[a]=PRIMES[0]*PRIMES[1];
+
+	    for (b=1; b<=a; b++) hash[a]+=PRIMES[(a*PRIMES[b]+b)%PRIMES_SIZE]*(unsigned long long)(history[b-1]+1);	//update hash value based on words from the history
+	    hash[a]=hash[a]%(direct_size/2);		//make sure that starting hash index is in the first half of syn_d (second part is reserved for history->words features)
+	}
+
+	for (a=vocab_size; a<layer2_size; a++) {
+	    for (b=0; b<direct_order; b++) if (hash[b]) {
+                if (filetype==COMPRESSED)
+                  neu2[a].ac+=centroid[READ_SYNCD(hash[b])]; // use compressed direct connections
+                else
+                  neu2[a].ac+=syn_d[hash[b]];           //apply current parameter and move to the next one
+		hash[b]++;
+	    } else break;
+	}
+    }
+
+    //activation 2   --softmax on classes
+    sum=0;
+    for (a=vocab_size; a<layer2_size; a++) {
+	if (neu2[a].ac>50) neu2[a].ac=50;  //for numerical stability
+	if (neu2[a].ac<-50) neu2[a].ac=-50;  //for numerical stability
+        val=FAST_EXP(neu2[a].ac);
+        sum+=val;
+        neu2[a].ac=val;
+    }
+    for (a=vocab_size; a<layer2_size; a++) neu2[a].ac/=sum;         //output layer activations now sum exactly to 1
+
+    if (gen>0) return;	//if we generate words, we don't know what current word is -> only classes are estimated and word is selected in testGen()
+
+
+    //1->2 word
+
+    if (word!=-1) {
+        for (c=0; c<class_cn[vocab[word].class_index]; c++) neu2[class_words[vocab[word].class_index][c]].ac=0;
+        if (layerc_size>0) {
+	    matrixXvector(neu2, neuc, sync, layerc_size, class_words[vocab[word].class_index][0], class_words[vocab[word].class_index][0]+class_cn[vocab[word].class_index], 0, layerc_size, 0);
+	}
+	else
+	{
+	    matrixXvector(neu2, neu1, syn1, layer1_size, class_words[vocab[word].class_index][0], class_words[vocab[word].class_index][0]+class_cn[vocab[word].class_index], 0, layer1_size, 0);
+	}
+    }
+
+    //apply direct connections to words
+    if (word!=-1) if (direct_size>0) {
+	unsigned long long hash[MAX_NGRAM_ORDER];
+
+	for (a=0; a<direct_order; a++) hash[a]=0;
+
+	for (a=0; a<direct_order; a++) {
+	    b=0;
+	    if (a>0) if (history[a-1]==-1) break;
+	    hash[a]=PRIMES[0]*PRIMES[1]*(unsigned long long)(vocab[word].class_index+1);
+
+	    for (b=1; b<=a; b++) hash[a]+=PRIMES[(a*PRIMES[b]+b)%PRIMES_SIZE]*(unsigned long long)(history[b-1]+1);
+	    hash[a]=(hash[a]%(direct_size/2))+(direct_size)/2;
+	}
+
+	for (c=0; c<class_cn[vocab[word].class_index]; c++) {
+	    a=class_words[vocab[word].class_index][c];
+
+	    for (b=0; b<direct_order; b++) if (hash[b]) {
+                if (filetype==COMPRESSED)
+                  neu2[a].ac+=centroid[READ_SYNCD(hash[b])];
+                else
+                  neu2[a].ac+=syn_d[hash[b]];
+		hash[b]++;
+		hash[b]=hash[b]%direct_size;
+	    } else break;
+	}
+    }
+
+    //activation 2   --softmax on words
+    sum=0;
+    if (word!=-1) {
+	for (c=0; c<class_cn[vocab[word].class_index]; c++) {
+	    a=class_words[vocab[word].class_index][c];
+	    if (neu2[a].ac>50) neu2[a].ac=50;  //for numerical stability
+	    if (neu2[a].ac<-50) neu2[a].ac=-50;  //for numerical stability
+    	    val=FAST_EXP(neu2[a].ac);
+    	    sum+=val;
+    	    neu2[a].ac=val;
+	}
+	for (c=0; c<class_cn[vocab[word].class_index]; c++) neu2[class_words[vocab[word].class_index][c]].ac/=sum;
+    }
+}
+
+void CRnnLM::learnNet(int last_word, int word)
+{
+    int a, b, c, t, step;
+    real beta2, beta3;
+
+    beta2=beta*alpha;
+    beta3=beta2*1;	//beta3 can be possibly larger than beta2, as that is useful on small datasets (if the final model is to be interpolated wich backoff model) - todo in the future
+
+    if (word==-1) return;
+
+    //compute error vectors
+    for (c=0; c<class_cn[vocab[word].class_index]; c++) {
+	a=class_words[vocab[word].class_index][c];
+        neu2[a].er=(0-neu2[a].ac);
+    }
+    neu2[word].er=(1-neu2[word].ac);	//word part
+
+    //flush error
+    for (a=0; a<layer1_size; a++) neu1[a].er=0;
+    for (a=0; a<layerc_size; a++) neuc[a].er=0;
+
+    for (a=vocab_size; a<layer2_size; a++) {
+        neu2[a].er=(0-neu2[a].ac);
+    }
+    neu2[vocab[word].class_index+vocab_size].er=(1-neu2[vocab[word].class_index+vocab_size].ac);	//class part
+
+    //
+    if (direct_size>0) {	//learn direct connections between words
+	if (word!=-1) {
+	    unsigned long long hash[MAX_NGRAM_ORDER];
+
+	    for (a=0; a<direct_order; a++) hash[a]=0;
+
+	    for (a=0; a<direct_order; a++) {
+		b=0;
+		if (a>0) if (history[a-1]==-1) break;
+		hash[a]=PRIMES[0]*PRIMES[1]*(unsigned long long)(vocab[word].class_index+1);
+
+	        for (b=1; b<=a; b++) hash[a]+=PRIMES[(a*PRIMES[b]+b)%PRIMES_SIZE]*(unsigned long long)(history[b-1]+1);
+		hash[a]=(hash[a]%(direct_size/2))+(direct_size)/2;
+	    }
+
+	    for (c=0; c<class_cn[vocab[word].class_index]; c++) {
+		a=class_words[vocab[word].class_index][c];
+
+		for (b=0; b<direct_order; b++) if (hash[b]) {
+		    syn_d[hash[b]]+=alpha*neu2[a].er - syn_d[hash[b]]*beta3;
+		    hash[b]++;
+		    hash[b]=hash[b]%direct_size;
+		} else break;
+	    }
+	}
+    }
+    //
+    //learn direct connections to classes
+    if (direct_size>0) {	//learn direct connections between words and classes
+	unsigned long long hash[MAX_NGRAM_ORDER];
+
+	for (a=0; a<direct_order; a++) hash[a]=0;
+
+	for (a=0; a<direct_order; a++) {
+	    b=0;
+	    if (a>0) if (history[a-1]==-1) break;
+	    hash[a]=PRIMES[0]*PRIMES[1];
+
+	    for (b=1; b<=a; b++) hash[a]+=PRIMES[(a*PRIMES[b]+b)%PRIMES_SIZE]*(unsigned long long)(history[b-1]+1);
+	    hash[a]=hash[a]%(direct_size/2);
+	}
+
+	for (a=vocab_size; a<layer2_size; a++) {
+	    for (b=0; b<direct_order; b++) if (hash[b]) {
+		syn_d[hash[b]]+=alpha*neu2[a].er - syn_d[hash[b]]*beta3;
+		hash[b]++;
+	    } else break;
+	}
+    }
+    //
+
+
+    if (layerc_size>0) {
+	matrixXvector(neuc, neu2, sync, layerc_size, class_words[vocab[word].class_index][0], class_words[vocab[word].class_index][0]+class_cn[vocab[word].class_index], 0, layerc_size, 1);
+
+	t=class_words[vocab[word].class_index][0]*layerc_size;
+	for (c=0; c<class_cn[vocab[word].class_index]; c++) {
+	    b=class_words[vocab[word].class_index][c];
+	    if ((counter%10)==0)	//regularization is done every 10. step
+		for (a=0; a<layerc_size; a++) sync[a+t].weight+=alpha*neu2[b].er*neuc[a].ac - sync[a+t].weight*beta2;
+	    else
+		for (a=0; a<layerc_size; a++) sync[a+t].weight+=alpha*neu2[b].er*neuc[a].ac;
+	    t+=layerc_size;
+	}
+	//
+	matrixXvector(neuc, neu2, sync, layerc_size, vocab_size, layer2_size, 0, layerc_size, 1);		//propagates errors 2->c for classes
+
+	c=vocab_size*layerc_size;
+	for (b=vocab_size; b<layer2_size; b++) {
+	    if ((counter%10)==0) {	//regularization is done every 10. step
+		for (a=0; a<layerc_size; a++) sync[a+c].weight+=alpha*neu2[b].er*neuc[a].ac - sync[a+c].weight*beta2;	//weight c->2 update
+	    }
+	    else {
+	        for (a=0; a<layerc_size; a++) sync[a+c].weight+=alpha*neu2[b].er*neuc[a].ac;	//weight c->2 update
+	    }
+	    c+=layerc_size;
+	}
+
+	for (a=0; a<layerc_size; a++) neuc[a].er=neuc[a].er*neuc[a].ac*(1-neuc[a].ac);    //error derivation at compression layer
+
+	////
+
+	matrixXvector(neu1, neuc, syn1, layer1_size, 0, layerc_size, 0, layer1_size, 1);		//propagates errors c->1
+
+	for (b=0; b<layerc_size; b++) {
+	    for (a=0; a<layer1_size; a++) syn1[a+b*layer1_size].weight+=alpha*neuc[b].er*neu1[a].ac;	//weight 1->c update
+	}
+    }
+    else
+    {
+    	matrixXvector(neu1, neu2, syn1, layer1_size, class_words[vocab[word].class_index][0], class_words[vocab[word].class_index][0]+class_cn[vocab[word].class_index], 0, layer1_size, 1);
+
+    	t=class_words[vocab[word].class_index][0]*layer1_size;
+	for (c=0; c<class_cn[vocab[word].class_index]; c++) {
+	    b=class_words[vocab[word].class_index][c];
+	    if ((counter%10)==0)	//regularization is done every 10. step
+		for (a=0; a<layer1_size; a++) syn1[a+t].weight+=alpha*neu2[b].er*neu1[a].ac - syn1[a+t].weight*beta2;
+	    else
+		for (a=0; a<layer1_size; a++) syn1[a+t].weight+=alpha*neu2[b].er*neu1[a].ac;
+	    t+=layer1_size;
+	}
+	//
+	matrixXvector(neu1, neu2, syn1, layer1_size, vocab_size, layer2_size, 0, layer1_size, 1);		//propagates errors 2->1 for classes
+
+	c=vocab_size*layer1_size;
+	for (b=vocab_size; b<layer2_size; b++) {
+	    if ((counter%10)==0) {	//regularization is done every 10. step
+		for (a=0; a<layer1_size; a++) syn1[a+c].weight+=alpha*neu2[b].er*neu1[a].ac - syn1[a+c].weight*beta2;	//weight 1->2 update
+	    }
+	    else {
+	        for (a=0; a<layer1_size; a++) syn1[a+c].weight+=alpha*neu2[b].er*neu1[a].ac;	//weight 1->2 update
+	    }
+	    c+=layer1_size;
+	}
+    }
+
+    //
+
+    ///////////////
+
+    if (bptt<=1) {		//bptt==1 -> normal BP
+	for (a=0; a<layer1_size; a++) neu1[a].er=neu1[a].er*neu1[a].ac*(1-neu1[a].ac);    //error derivation at layer 1
+
+	//weight update 1->0
+	a=last_word;
+	if (a!=-1) {
+	    if ((counter%10)==0)
+		for (b=0; b<layer1_size; b++) syn0[a+b*layer0_size].weight+=alpha*neu1[b].er*neu0[a].ac - syn0[a+b*layer0_size].weight*beta2;
+	    else
+		for (b=0; b<layer1_size; b++) syn0[a+b*layer0_size].weight+=alpha*neu1[b].er*neu0[a].ac;
+	}
+
+	if ((counter%10)==0) {
+	    for (b=0; b<layer1_size; b++) for (a=layer0_size-layer1_size; a<layer0_size; a++) syn0[a+b*layer0_size].weight+=alpha*neu1[b].er*neu0[a].ac - syn0[a+b*layer0_size].weight*beta2;
+	}
+	else {
+	    for (b=0; b<layer1_size; b++) for (a=layer0_size-layer1_size; a<layer0_size; a++) syn0[a+b*layer0_size].weight+=alpha*neu1[b].er*neu0[a].ac;
+	}
+    }
+    else		//BPTT
+    {
+	for (b=0; b<layer1_size; b++) bptt_hidden[b].ac=neu1[b].ac;
+	for (b=0; b<layer1_size; b++) bptt_hidden[b].er=neu1[b].er;
+
+	if (((counter%bptt_block)==0) || (independent && (word==0))) {
+	    for (step=0; step<bptt+bptt_block-2; step++) {
+		for (a=0; a<layer1_size; a++) neu1[a].er=neu1[a].er*neu1[a].ac*(1-neu1[a].ac);    //error derivation at layer 1
+
+ 		//weight update 1->0
+		a=bptt_history[step];
+		if (a!=-1)
+		for (b=0; b<layer1_size; b++) {
+    		    bptt_syn0[a+b*layer0_size].weight+=alpha*neu1[b].er;//*neu0[a].ac; --should be always set to 1
+		}
+
+		for (a=layer0_size-layer1_size; a<layer0_size; a++) neu0[a].er=0;
+
+		matrixXvector(neu0, neu1, syn0, layer0_size, 0, layer1_size, layer0_size-layer1_size, layer0_size, 1);		//propagates errors 1->0
+		for (b=0; b<layer1_size; b++) for (a=layer0_size-layer1_size; a<layer0_size; a++) {
+		    //neu0[a].er += neu1[b].er * syn0[a+b*layer0_size].weight;
+    		    bptt_syn0[a+b*layer0_size].weight+=alpha*neu1[b].er*neu0[a].ac;
+		}
+
+		for (a=0; a<layer1_size; a++) {		//propagate error from time T-n to T-n-1
+    		    neu1[a].er=neu0[a+layer0_size-layer1_size].er + bptt_hidden[(step+1)*layer1_size+a].er;
+		}
+
+		if (step<bptt+bptt_block-3)
+		for (a=0; a<layer1_size; a++) {
+		    neu1[a].ac=bptt_hidden[(step+1)*layer1_size+a].ac;
+		    neu0[a+layer0_size-layer1_size].ac=bptt_hidden[(step+2)*layer1_size+a].ac;
+		}
+	    }
+
+	    for (a=0; a<(bptt+bptt_block)*layer1_size; a++) {
+		bptt_hidden[a].er=0;
+	    }
+
+
+	    for (b=0; b<layer1_size; b++) neu1[b].ac=bptt_hidden[b].ac;		//restore hidden layer after bptt
+
+
+	    //
+	    for (b=0; b<layer1_size; b++) {		//copy temporary syn0
+		if ((counter%10)==0) {
+		    for (a=layer0_size-layer1_size; a<layer0_size; a++) {
+    		        syn0[a+b*layer0_size].weight+=bptt_syn0[a+b*layer0_size].weight - syn0[a+b*layer0_size].weight*beta2;
+    			bptt_syn0[a+b*layer0_size].weight=0;
+    		    }
+		}
+		else {
+		    for (a=layer0_size-layer1_size; a<layer0_size; a++) {
+    			syn0[a+b*layer0_size].weight+=bptt_syn0[a+b*layer0_size].weight;
+    			bptt_syn0[a+b*layer0_size].weight=0;
+    		    }
+		}
+
+		if ((counter%10)==0) {
+		    for (step=0; step<bptt+bptt_block-2; step++) if (bptt_history[step]!=-1) {
+	    		syn0[bptt_history[step]+b*layer0_size].weight+=bptt_syn0[bptt_history[step]+b*layer0_size].weight - syn0[bptt_history[step]+b*layer0_size].weight*beta2;
+	    		bptt_syn0[bptt_history[step]+b*layer0_size].weight=0;
+	    	    }
+		}
+		else {
+		    for (step=0; step<bptt+bptt_block-2; step++) if (bptt_history[step]!=-1) {
+	    		syn0[bptt_history[step]+b*layer0_size].weight+=bptt_syn0[bptt_history[step]+b*layer0_size].weight;
+			bptt_syn0[bptt_history[step]+b*layer0_size].weight=0;
+		    }
+		}
+	    }
+	}
+    }
+}
+
+void CRnnLM::copyHiddenLayerToInput()
+{
+    int a;
+
+    for (a=0; a<layer1_size; a++) {
+        neu0[a+layer0_size-layer1_size].ac=neu1[a].ac;
+    }
+}
+
+void CRnnLM::trainNet()
+{
+    int a, b, word, last_word, wordcn;
+    char log_name[200];
+    FILE *fi, *flog;
+    clock_t start, now;
+
+    sprintf(log_name, "%s.output.txt", rnnlm_file);
+
+    fprintf(stderr,"Starting training using file %s\n", train_file);
+    starting_alpha=alpha;
+
+    fi=fopen(rnnlm_file, "rb");
+    if (fi!=NULL) {
+	fclose(fi);
+	fprintf(stderr,"Restoring network from file to continue training...\n");
+	restoreNet();
+    } else {
+	learnVocabFromTrainFile();
+	initNet();
+	iter=0;
+    }
+
+    if (class_size>vocab_size) {
+	fprintf(stderr,"WARNING: number of classes exceeds vocabulary size!\n");
+    }
+
+    counter=train_cur_pos;
+
+    //saveNet();
+
+    while (1) {
+        fprintf(stderr,"Iter: %3d\tAlpha: %f\t   ", iter, alpha);
+        fflush(stdout);
+
+        if (bptt>0) for (a=0; a<bptt+bptt_block; a++) bptt_history[a]=0;
+        for (a=0; a<MAX_NGRAM_ORDER; a++) history[a]=0;
+
+        //TRAINING PHASE
+        netFlush();
+
+        fi=fopen(train_file, "rb");
+        last_word=0;
+
+        if (counter>0) for (a=0; a<counter; a++) word=readWordIndex(fi);	//this will skip words that were already learned if the training was interrupted
+
+        start=clock();
+
+        while (1) {
+    	    counter++;
+
+    	    if ((counter%10000)==0) if ((debug_mode>1)) {
+    		now=clock();
+    		if (train_words>0)
+    		    fprintf(stderr,"%cIter: %3d\tAlpha: %f\t   TRAIN entropy: %.4f    Progress: %.2f%%   Words/sec: %.1f ", 13, iter, alpha, -logp/log10(2)/counter, counter/(real)train_words*100, counter/((double)(now-start)/1000000.0));
+    		else
+    		    fprintf(stderr,"%cIter: %3d\tAlpha: %f\t   TRAIN entropy: %.4f    Progress: %dK", 13, iter, alpha, -logp/log10(2)/counter, counter/1000);
+    		fflush(stdout);
+    	    }
+
+    	    if ((anti_k>0) && ((counter%anti_k)==0)) {
+    		train_cur_pos=counter;
+    		saveNet();
+    	    }
+
+	    word=readWordIndex(fi);     //read next word
+            computeNet(last_word, word);      //compute probability distribution
+            if (feof(fi)) break;        //end of file: test on validation data, iterate till convergence
+
+            if (word!=-1) logp+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac);
+
+    	    if ((logp!=logp) || (isinf(logp))) {
+    	        fprintf(stderr,"\nNumerical error %d %f %f\n", word, neu2[word].ac, neu2[vocab[word].class_index+vocab_size].ac);
+    	        exit(1);
+    	    }
+
+            //
+            if (bptt>0) {		//shift memory needed for bptt to next time step
+		for (a=bptt+bptt_block-1; a>0; a--) bptt_history[a]=bptt_history[a-1];
+		bptt_history[0]=last_word;
+
+		for (a=bptt+bptt_block-1; a>0; a--) for (b=0; b<layer1_size; b++) {
+		    bptt_hidden[a*layer1_size+b].ac=bptt_hidden[(a-1)*layer1_size+b].ac;
+		    bptt_hidden[a*layer1_size+b].er=bptt_hidden[(a-1)*layer1_size+b].er;
+		}
+            }
+            //
+            learnNet(last_word, word);
+
+            copyHiddenLayerToInput();
+
+            if (last_word!=-1) neu0[last_word].ac=0;  //delete previous activation
+
+            last_word=word;
+
+            for (a=MAX_NGRAM_ORDER-1; a>0; a--) history[a]=history[a-1];
+            history[0]=last_word;
+
+	    if (independent && (word==0)) netReset();
+        }
+        fclose(fi);
+
+	now=clock();
+    	fprintf(stderr,"%cIter: %3d\tAlpha: %f\t   TRAIN entropy: %.4f    Words/sec: %.1f   ", 13, iter, alpha, -logp/log10(2)/counter, counter/((double)(now-start)/1000000.0));
+
+    	if (one_iter==1) {	//no validation data are needed and network is always saved with modified weights
+    	    fprintf(stderr,"\n");
+	    logp=0;
+    	    saveNet();
+            break;
+    	}
+
+        //VALIDATION PHASE
+        netFlush();
+
+        fi=fopen(valid_file, "rb");
+	if (fi==NULL) {
+	    fprintf(stderr,"Valid file not found\n");
+	    exit(1);
+	}
+
+        flog=fopen(log_name, "ab");
+	if (flog==NULL) {
+	    fprintf(stderr,"Cannot open log file\n");
+	    exit(1);
+	}
+
+        //fprintf(flog, "Index   P(NET)          Word\n");
+        //fprintf(flog, "----------------------------------\n");
+
+        last_word=0;
+        logp=0;
+        wordcn=0;
+        while (1) {
+            word=readWordIndex(fi);     //read next word
+            computeNet(last_word, word);      //compute probability distribution
+            if (feof(fi)) break;        //end of file: report LOGP, PPL
+
+    	    if (word!=-1) {
+    		logp+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac);
+        	wordcn++;
+    	    }
+
+            /*if (word!=-1)
+                fprintf(flog, "%d\t%f\t%s\n", word, neu2[word].ac, vocab[word].word);
+            else
+                fprintf(flog, "-1\t0\t\tOOV\n");*/
+
+            //learnNet(last_word, word);    //*** this will be in implemented for dynamic models
+            copyHiddenLayerToInput();
+
+            if (last_word!=-1) neu0[last_word].ac=0;  //delete previous activation
+
+            last_word=word;
+
+            for (a=MAX_NGRAM_ORDER-1; a>0; a--) history[a]=history[a-1];
+            history[0]=last_word;
+
+	    if (independent && (word==0)) netReset();
+        }
+        fclose(fi);
+
+        fprintf(flog, "\niter: %d\n", iter);
+        fprintf(flog, "valid log probability: %f\n", logp);
+        fprintf(flog, "PPL net: %f\n", exp10(-logp/(real)wordcn));
+
+        fclose(flog);
+
+        fprintf(stderr,"VALID entropy: %.4f\n", -logp/log10(2)/wordcn);
+
+        counter=0;
+	train_cur_pos=0;
+
+        if (logp<llogp)
+            restoreWeights();
+        else
+            saveWeights();
+
+        if (logp*min_improvement<llogp) {
+            if (alpha_divide==0) alpha_divide=1;
+            else {
+                saveNet();
+                break;
             }
         }
 
-        test_data_set = 1;
+        if (alpha_divide) alpha/=2;
+
+        llogp=logp;
+        logp=0;
+        iter++;
+        saveNet();
     }
-    //set class size parameter
-    i = argPos((char *)"-class", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: amount of classes not specified!\n");
-            return 0;
-        }
+}
 
-        class_size = atoi(argv[i + 1]);
 
-        if (debug_mode > 0)
-            fprintf(stderr, "class size: %d\n", class_size);
-    }
-    //set old class
-    i = argPos((char *)"-old-classes", argc, argv);
-    if (i > 0) {
-        old_classes = 1;
+double CRnnLM::testNetKMean()
+{
+    int a, word, last_word, wordcn;
+    FILE *fi=fopen(test_file, "rb");
+    double logp, log_combine, log_other,prob_other;
 
-        if (debug_mode > 0)
-            fprintf(stderr,
-                    "Old algorithm for computing classes will be used\n");
-    }
-    //set lambda
-    i = argPos((char *)"-lambda", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: lambda not specified!\n");
-            return 0;
-        }
+    last_word=0;                                        //last word = end of sentence
+    logp=0;
+    log_other=0;
+    log_combine=0;
+    prob_other=0;
+    wordcn=0;
 
-        lambda = atof(argv[i + 1]);
+    copyHiddenLayerToInput();
 
-        if (debug_mode > 0)
-            fprintf(stderr,
-                    "Lambda (interpolation coefficient between rnnlm and other lm): %f\n",
-                    lambda);
-    }
-    //set gradient cutoff
-    i = argPos((char *)"-gradient-cutoff", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: gradient cutoff not specified!\n");
-            return 0;
-        }
+    if (bptt>0) for (a=0; a<bptt+bptt_block; a++) bptt_history[a]=0;
+    for (a=0; a<MAX_NGRAM_ORDER; a++) history[a]=0;
+    netReset();
 
-        gradient_cutoff = atof(argv[i + 1]);
+    while (1) {
 
-        if (debug_mode > 0)
-            fprintf(stderr, "Gradient cutoff: %f\n", gradient_cutoff);
-    }
-    //set dynamic
-    i = argPos((char *)"-dynamic", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: dynamic learning rate not specified!\n");
-            return 0;
-        }
+        word=readWordIndex(fi);         //read next word
+        computeNet(last_word, word);            //compute probability distribution
+        if (feof(fi)) break;            //end of file: report LOGP, PPL
 
-        dynamic = atof(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Dynamic learning rate: %f\n", dynamic);
-    }
-    //set compress
-    i = argPos((char *)"-compress", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: number of bits not specified!\n");
-            return 0;
-        }
-
-        ncluster = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Number of clustering bits: %d\n", ncluster);
-    }
-    //set kmean
-    i = argPos((char *)"-kmean", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: number of iterations not specified!\n");
-            return 0;
-        }
-
-        kmean_iter = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr,
-                    "Using kmean quantization with given number of iterations: %d\n",
-                    kmean_iter);
-    }
-    //set write-compressed
-    i = argPos((char *)"-write-compressed", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr,
-                    "ERROR: compressed model filename not specified!\n");
-            return 0;
-        }
-
-        strcpy(compress_file, argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Writing compressed model to: %s\n", compress_file);
-    }
-    //set gen
-    i = argPos((char *)"-gen", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: gen parameter not specified!\n");
-            return 0;
-        }
-
-        gen = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Generating # words: %d\n", gen);
-    }
-    //set independent
-    i = argPos((char *)"-independent", argc, argv);
-    if (i > 0) {
-        independent = 1;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Sentences will be processed independently...\n");
-    }
-    //set learning rate
-    i = argPos((char *)"-alpha", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: alpha not specified!\n");
-            return 0;
-        }
-
-        starting_alpha = atof(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Starting learning rate: %f\n", starting_alpha);
-        alpha_set = 1;
-    }
-    //set regularization
-    i = argPos((char *)"-beta", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: beta not specified!\n");
-            return 0;
-        }
-
-        regularization = atof(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Regularization: %f\n", regularization);
-    }
-    //set min improvement
-    i = argPos((char *)"-min-improvement", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr,
-                    "ERROR: minimal improvement value not specified!\n");
-            return 0;
-        }
-
-        min_improvement = atof(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Min improvement: %f\n", min_improvement);
-    }
-    //set anti kasparek
-    i = argPos((char *)"-anti-kasparek", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: anti-kasparek parameter not set!\n");
-            return 0;
-        }
-
-        anti_k = atoi(argv[i + 1]);
-
-        if ((anti_k != 0) && (anti_k < 10000))
-            anti_k = 10000;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Model will be saved after each # words: %d\n",
-                    anti_k);
-    }
-    //set hidden layer size
-    i = argPos((char *)"-hidden", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: hidden layer size not specified!\n");
-            return 0;
-        }
-
-        hidden_size = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Hidden layer size: %d\n", hidden_size);
-    }
-    //set compression layer size
-    i = argPos((char *)"-compression", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: compression layer size not specified!\n");
-            return 0;
-        }
-
-        compression_size = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Compression layer size: %d\n", compression_size);
-    }
-    //set direct connections
-    i = argPos((char *)"-direct", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: direct connections not specified!\n");
-            return 0;
-        }
-
-        direct = atoi(argv[i + 1]);
-
-        direct *= 1000000;
-        if (direct < 0)
-            direct = 0;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Direct connections: %dM\n",
-                    (int)(direct / 1000000));
-    }
-    //set order of direct connections
-    i = argPos((char *)"-direct-order", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: direct order not specified!\n");
-            return 0;
-        }
-
-        direct_order = atoi(argv[i + 1]);
-        if (direct_order > MAX_NGRAM_ORDER)
-            direct_order = MAX_NGRAM_ORDER;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Order of direct connections: %d\n", direct_order);
-    }
-    //set bptt
-    i = argPos((char *)"-bptt", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: bptt value not specified!\n");
-            return 0;
-        }
-
-        bptt = atoi(argv[i + 1]);
-        bptt++;
-        if (bptt < 1)
-            bptt = 1;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "BPTT: %d\n", bptt - 1);
-    }
-    //set bptt block
-    i = argPos((char *)"-bptt-block", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: bptt block value not specified!\n");
-            return 0;
-        }
-
-        bptt_block = atoi(argv[i + 1]);
-        if (bptt_block < 1)
-            bptt_block = 1;
-
-        if (debug_mode > 0)
-            fprintf(stderr, "BPTT block: %d\n", bptt_block);
-    }
-    //set random seed
-    i = argPos((char *)"-rand-seed", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: Random seed variable not specified!\n");
-            return 0;
-        }
-
-        rand_seed = atoi(argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "Rand seed: %d\n", rand_seed);
-    }
-    //use other lm
-    i = argPos((char *)"-lm-prob", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: other lm file not specified!\n");
-            return 0;
-        }
-
-        strcpy(lmprob_file, argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "other lm probabilities specified in: %s\n",
-                    lmprob_file);
-
-        f = fopen(lmprob_file, "rb");
-        if (f == NULL) {
-            fprintf(stderr, "ERROR: other lm file not found!\n");
-            return 0;
-        }
-
-        use_lmprob = 1;
-    }
-    //search for binary option
-    i = argPos((char *)"-binary", argc, argv);
-    if (i > 0) {
-        if (debug_mode > 0)
-            fprintf(stderr, "Model will be saved in binary format\n");
-
-        fileformat = BINARY;
-    }
-    //search for rnnlm file
-    i = argPos((char *)"-rnnlm", argc, argv);
-    if (i > 0) {
-        if (i + 1 == argc) {
-            fprintf(stderr, "ERROR: model file not specified!\n");
-            return 0;
-        }
-
-        strcpy(rnnlm_file, argv[i + 1]);
-
-        if (debug_mode > 0)
-            fprintf(stderr, "rnnlm file: %s\n", rnnlm_file);
-
-        f = fopen(rnnlm_file, "rb");
-
-        rnnlm_file_set = 1;
-    }
-    if (train_mode && !rnnlm_file_set) {
-        fprintf(stderr, "ERROR: rnnlm file must be specified for training!\n");
-        return 0;
-    }
-    if (test_data_set && !rnnlm_file_set) {
-        fprintf(stderr, "ERROR: rnnlm file must be specified for testing!\n");
-        return 0;
-    }
-    if (!test_data_set && !train_mode && gen == 0) {
-        fprintf(stderr, "ERROR: training or testing must be specified!\n");
-        return 0;
-    }
-    if ((gen > 0) && !rnnlm_file_set) {
-        fprintf(stderr,
-                "ERROR: rnnlm file must be specified to generate words!\n");
-        return 0;
-    }
-
-    srand(1);
-
-    if (train_mode) {
-        CRnnLM model1;
-
-        model1.setTrainFile(train_file);
-        model1.setRnnLMFile(rnnlm_file);
-        model1.setFileType(fileformat);
-
-        model1.setOneIter(one_iter);
-        if (one_iter == 0)
-            model1.setValidFile(valid_file);
-
-        model1.setClassSize(class_size);
-        model1.setOldClasses(old_classes);
-        model1.setLearningRate(starting_alpha);
-        model1.setGradientCutoff(gradient_cutoff);
-        model1.setRegularization(regularization);
-        model1.setMinImprovement(min_improvement);
-        model1.setHiddenLayerSize(hidden_size);
-        model1.setCompressionLayerSize(compression_size);
-        model1.setDirectSize(direct);
-        model1.setDirectOrder(direct_order);
-        model1.setBPTT(bptt);
-        model1.setBPTTBlock(bptt_block);
-        model1.setRandSeed(rand_seed);
-        model1.setDebugMode(debug_mode);
-        model1.setAntiKasparek(anti_k);
-        model1.setIndependent(independent);
-
-        model1.alpha_set = alpha_set;
-        model1.train_file_set = train_file_set;
-
-        model1.trainNet();
-    }
-
-    if (test_data_set && rnnlm_file_set) {
-        CRnnLM model1;
-
-        model1.setLambda(lambda);
-        model1.setRegularization(regularization);
-        model1.setDynamic(dynamic);
-        model1.setTestFile(test_file);
-        model1.setRnnLMFile(rnnlm_file);
-        model1.setRandSeed(rand_seed);
-        model1.useLMProb(use_lmprob);
-        if (use_lmprob)
-            model1.setLMProbFile(lmprob_file);
-        model1.setDebugMode(debug_mode);
-
-        if (nbest == 0) {
-            // FIXME this is an ugly hack!
-            if (ncluster != 0) {
-                model1.setNCluster(ncluster);
-                if (kmean_iter > 0)
-                    model1.setKMean(kmean_iter);
-                model1.setFileType(COMPRESSED);
+        if ((word!=-1) || (prob_other>0)) {
+            if (word==-1) {
+                logp+=-8;               //some ad hoc penalty - when mixing different vocabularies, single model score is not real PPL
+                log_combine+=log10(0 * lambda + prob_other*(1-lambda));
+            } else {
+                logp+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac);
+                log_combine+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac*lambda + prob_other*(1-lambda));
             }
-            model1.testNet();
-            if (compress_file[0] != 0) {
-                model1.setRnnLMFile(compress_file);
-                model1.saveNet();
+            log_other+=log10(prob_other);
+            wordcn++;
+        }
+
+        copyHiddenLayerToInput();
+
+        if (last_word!=-1) neu0[last_word].ac=0;  //delete previous activation
+
+        last_word=word;
+
+        for (a=MAX_NGRAM_ORDER-1; a>0; a--) history[a]=history[a-1];
+        history[0]=last_word;
+
+        if (independent && (word==0)) netReset();
+    }
+    fclose(fi);
+
+    return exp10(-logp/(real)wordcn);
+}
+
+
+void CRnnLM::testNet()
+{
+    int a, b, word, last_word, wordcn;
+    FILE *fi, *flog, *lmprob=NULL;
+    real prob_other, log_other, log_combine;
+    double d;
+
+    restoreNet();
+
+    if (use_lmprob) {
+	lmprob=fopen(lmprob_file, "rb");
+    }
+
+    //TEST PHASE
+    //netFlush();
+
+    fi=fopen(test_file, "rb");
+    //sprintf(str, "%s.%s.output.txt", rnnlm_file, test_file);
+    //flog=fopen(str, "wb");
+    flog=stdout;
+
+    if (debug_mode>1)	{
+	if (use_lmprob) {
+    	    fprintf(flog, "Index   P(NET)          P(LM)           Word\n");
+    	    fprintf(flog, "--------------------------------------------------\n");
+	} else {
+    	    fprintf(flog, "Index   P(NET)          Word\n");
+    	    fprintf(flog, "----------------------------------\n");
+	}
+    }
+
+    last_word=0;					//last word = end of sentence
+    logp=0;
+    log_other=0;
+    log_combine=0;
+    prob_other=0;
+    wordcn=0;
+    copyHiddenLayerToInput();
+
+    if (bptt>0) for (a=0; a<bptt+bptt_block; a++) bptt_history[a]=0;
+    for (a=0; a<MAX_NGRAM_ORDER; a++) history[a]=0;
+    if (independent) netReset();
+
+    while (1) {
+
+        word=readWordIndex(fi);		//read next word
+        computeNet(last_word, word);		//compute probability distribution
+        if (feof(fi)) break;		//end of file: report LOGP, PPL
+
+        if (use_lmprob) {
+            fscanf(lmprob, "%lf", &d);
+    	    prob_other=d;
+
+            goToDelimiter('\n', lmprob);
+        }
+
+        if ((word!=-1) || (prob_other>0)) {
+    	    if (word==-1) {
+    		logp+=-8;		//some ad hoc penalty - when mixing different vocabularies, single model score is not real PPL
+        	log_combine+=log10(0 * lambda + prob_other*(1-lambda));
+    	    } else {
+    		logp+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac);
+        	log_combine+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac*lambda + prob_other*(1-lambda));
+    	    }
+    	    log_other+=log10(prob_other);
+            wordcn++;
+        }
+
+	if (debug_mode>1) {
+    	    if (use_lmprob) {
+        	if (word!=-1) fprintf(flog, "%d\t%.10f\t%.10f\t%s", word, neu2[vocab[word].class_index+vocab_size].ac *neu2[word].ac, prob_other, vocab[word].word);
+        	else fprintf(flog, "-1\t0\t\t0\t\tOOV");
+    	    } else {
+        	if (word!=-1) fprintf(flog, "%d\t%.10f\t%s", word, neu2[vocab[word].class_index+vocab_size].ac *neu2[word].ac, vocab[word].word);
+        	else fprintf(flog, "-1\t0\t\tOOV");
+    	    }
+
+    	    fprintf(flog, "\n");
+    	}
+
+        if (dynamic>0) {
+            if (bptt>0) {
+                for (a=bptt+bptt_block-1; a>0; a--) bptt_history[a]=bptt_history[a-1];
+                bptt_history[0]=last_word;
+
+                for (a=bptt+bptt_block-1; a>0; a--) for (b=0; b<layer1_size; b++) {
+                    bptt_hidden[a*layer1_size+b].ac=bptt_hidden[(a-1)*layer1_size+b].ac;
+                    bptt_hidden[a*layer1_size+b].er=bptt_hidden[(a-1)*layer1_size+b].er;
+        	}
             }
-        } else
-            model1.testNbest();
+            //
+            alpha=dynamic;
+    	    learnNet(last_word, word);    //dynamic update
+    	}
+        copyHiddenLayerToInput();
+
+        if (last_word!=-1) neu0[last_word].ac=0;  //delete previous activation
+
+        last_word=word;
+
+        for (a=MAX_NGRAM_ORDER-1; a>0; a--) history[a]=history[a-1];
+        history[0]=last_word;
+
+	if (independent && (word==0)) netReset();
+    }
+    fclose(fi);
+    if (use_lmprob) fclose(lmprob);
+
+    //write to log file
+    if (debug_mode>0) {
+	fprintf(flog, "\ntest log probability: %f\n", logp);
+	if (use_lmprob) {
+    	    fprintf(flog, "test log probability given by other lm: %f\n", log_other);
+    	    fprintf(flog, "test log probability %f*rnn + %f*other_lm: %f\n", lambda, 1-lambda, log_combine);
+	}
+
+	fprintf(flog, "\nPPL net: %f\n", exp10(-logp/(real)wordcn));
+	if (use_lmprob) {
+    	    fprintf(flog, "PPL other: %f\n", exp10(-log_other/(real)wordcn));
+    	    fprintf(flog, "PPL combine: %f\n", exp10(-log_combine/(real)wordcn));
+	}
     }
 
-    if (gen > 0) {
-        CRnnLM model1;
+    fclose(flog);
+}
 
-        model1.setRnnLMFile(rnnlm_file);
-        model1.setDebugMode(debug_mode);
-        model1.setRandSeed(rand_seed);
-        model1.setGen(gen);
+/*
+double CRnnLM::testNetKMean()
+{
+    int a, b, word, last_word, wordcn;
+    FILE *fi, *flog, *lmprob=NULL;
+    real prob_other, log_other, log_combine;
+    double d;
 
-        model1.testGen();
+//    restoreNet();
+
+    if (use_lmprob) {
+	lmprob=fopen(lmprob_file, "rb");
     }
 
-    return 0;
+    //TEST PHASE
+    //netFlush();
+
+    fi=fopen(test_file, "rb");
+    //sprintf(str, "%s.%s.output.txt", rnnlm_file, test_file);
+    //flog=fopen(str, "wb");
+    flog=stdout;
+
+    if (debug_mode>1)	{
+	if (use_lmprob) {
+    	    fprintf(flog, "Index   P(NET)          P(LM)           Word\n");
+    	    fprintf(flog, "--------------------------------------------------\n");
+	} else {
+    	    fprintf(flog, "Index   P(NET)          Word\n");
+    	    fprintf(flog, "----------------------------------\n");
+	}
+    }
+
+    last_word=0;					//last word = end of sentence
+    logp=0;
+    log_other=0;
+    log_combine=0;
+    prob_other=0;
+    wordcn=0;
+    copyHiddenLayerToInput();
+
+    if (bptt>0) for (a=0; a<bptt+bptt_block; a++) bptt_history[a]=0;
+    for (a=0; a<MAX_NGRAM_ORDER; a++) history[a]=0;
+    netReset();
+
+    while (1) {
+
+        word=readWordIndex(fi);		//read next word
+        computeNet(last_word, word);		//compute probability distribution
+        if (feof(fi)) break;		//end of file: report LOGP, PPL
+
+        if (use_lmprob) {
+            fscanf(lmprob, "%lf", &d);
+    	    prob_other=d;
+
+            goToDelimiter('\n', lmprob);
+        }
+
+        if ((word!=-1) || (prob_other>0)) {
+    	    if (word==-1) {
+    		logp+=-8;		//some ad hoc penalty - when mixing different vocabularies, single model score is not real PPL
+        	log_combine+=log10(0 * lambda + prob_other*(1-lambda));
+    	    } else {
+    		logp+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac);
+        	log_combine+=log10(neu2[vocab[word].class_index+vocab_size].ac * neu2[word].ac*lambda + prob_other*(1-lambda));
+    	    }
+    	    log_other+=log10(prob_other);
+            wordcn++;
+        }
+
+	if (debug_mode>1) {
+    	    if (use_lmprob) {
+        	if (word!=-1) fprintf(flog, "%d\t%.10f\t%.10f\t%s", word, neu2[vocab[word].class_index+vocab_size].ac *neu2[word].ac, prob_other, vocab[word].word);
+        	else fprintf(flog, "-1\t0\t\t0\t\tOOV");
+    	    } else {
+        	if (word!=-1) fprintf(flog, "%d\t%.10f\t%s", word, neu2[vocab[word].class_index+vocab_size].ac *neu2[word].ac, vocab[word].word);
+        	else fprintf(flog, "-1\t0\t\tOOV");
+    	    }
+
+    	    fprintf(flog, "\n");
+    	}
+
+        if (dynamic>0) {
+            if (bptt>0) {
+                for (a=bptt+bptt_block-1; a>0; a--) bptt_history[a]=bptt_history[a-1];
+                bptt_history[0]=last_word;
+
+                for (a=bptt+bptt_block-1; a>0; a--) for (b=0; b<layer1_size; b++) {
+                    bptt_hidden[a*layer1_size+b].ac=bptt_hidden[(a-1)*layer1_size+b].ac;
+                    bptt_hidden[a*layer1_size+b].er=bptt_hidden[(a-1)*layer1_size+b].er;
+        	}
+            }
+            //
+            alpha=dynamic;
+    	    learnNet(last_word, word);    //dynamic update
+    	}
+        copyHiddenLayerToInput();
+
+        if (last_word!=-1) neu0[last_word].ac=0;  //delete previous activation
+
+        last_word=word;
+
+        for (a=MAX_NGRAM_ORDER-1; a>0; a--) history[a]=history[a-1];
+        history[0]=last_word;
+
+	if (independent && (word==0)) netReset();
+    }
+    fclose(fi);
+    if (use_lmprob) fclose(lmprob);
+
+    //write to log file
+    if (debug_mode>0) {
+	fprintf(flog, "\ntest log probability: %f\n", logp);
+	if (use_lmprob) {
+    	    fprintf(flog, "test log probability given by other lm: %f\n", log_other);
+    	    fprintf(flog, "test log probability %f*rnn + %f*other_lm: %f\n", lambda, 1-lambda, log_combine);
+	}
+
+	fprintf(flog, "\nPPL net: %f\n", exp10(-logp/(real)wordcn));
+	if (use_lmprob) {
+    	    fprintf(flog, "PPL other: %f\n", exp10(-log_other/(real)wordcn));
+    	    fprintf(flog, "PPL combine: %f\n", exp10(-log_combine/(real)wordcn));
+	}
+    }
+
+    fclose(flog);
+    return exp10(-logp/(real)wordcn);
+}
+*/
+
+
+void CRnnLM::testNbest()
+{
+    int a, word, last_word, wordcn;
+    FILE *fi, *flog, *lmprob=NULL;
+    float prob_other; //has to be float so that %f works in fscanf
+    real log_other, log_combine, senp;
+    //int nbest=-1;
+    int nbest_cn=0;
+    char ut1[MAX_STRING], ut2[MAX_STRING];
+
+    restoreNet();
+    computeNet(0, 0);
+    copyHiddenLayerToInput();
+    saveContext();
+    saveContext2();
+
+    if (use_lmprob) {
+	lmprob=fopen(lmprob_file, "rb");
+    } else lambda=1;		//!!! for simpler implementation later
+
+    //TEST PHASE
+    //netFlush();
+
+    for (a=0; a<MAX_NGRAM_ORDER; a++) history[a]=0;
+
+    if (!strcmp(test_file, "-")) fi=stdin; else fi=fopen(test_file, "rb");
+
+    //sprintf(str, "%s.%s.output.txt", rnnlm_file, test_file);
+    //flog=fopen(str, "wb");
+    flog=stdout;
+
+    last_word=0;		//last word = end of sentence
+    logp=0;
+    log_other=0;
+    prob_other=0;
+    log_combine=0;
+    wordcn=0;
+    senp=0;
+    strcpy(ut1, (char *)"");
+    while (1) {
+	if (last_word==0) {
+	    fscanf(fi, "%s", ut2);
+
+	    if (nbest_cn==1) saveContext2();		//save context after processing first sentence in nbest
+
+	    if (strcmp(ut1, ut2)) {
+		strcpy(ut1, ut2);
+		nbest_cn=0;
+		restoreContext2();
+		saveContext();
+	    } else restoreContext();
+
+	    nbest_cn++;
+
+	    copyHiddenLayerToInput();
+        }
+
+
+	word=readWordIndex(fi);     //read next word
+	if (lambda>0) computeNet(last_word, word);      //compute probability distribution
+        if (feof(fi)) break;        //end of file: report LOGP, PPL
+
+
+        if (use_lmprob) {
+            fscanf(lmprob, "%f", &prob_other);
+            goToDelimiter('\n', lmprob);
+        }
+
+        if (word!=-1)
+        neu2[word].ac*=neu2[vocab[word].class_index+vocab_size].ac;
+
+        if (word!=-1) {
+            logp+=log10(neu2[word].ac);
+
+            log_other+=log10(prob_other);
+
+            log_combine+=log10(neu2[word].ac*lambda + prob_other*(1-lambda));
+
+            senp+=log10(neu2[word].ac*lambda + prob_other*(1-lambda));
+
+            wordcn++;
+        } else {
+    	    //assign to OOVs some score to correctly rescore nbest lists, reasonable value can be less than 1/|V| or backoff LM score (in case it is trained on more data)
+    	    //this means that PPL results from nbest list rescoring are not true probabilities anymore (as in open vocabulary LMs)
+
+    	    real oov_penalty=-5;	//log penalty
+
+    	    if (prob_other!=0) {
+    		logp+=log10(prob_other);
+    		log_other+=log10(prob_other);
+    		log_combine+=log10(prob_other);
+    		senp+=log10(prob_other);
+    	    } else {
+    		logp+=oov_penalty;
+    		log_other+=oov_penalty;
+    		log_combine+=oov_penalty;
+    		senp+=oov_penalty;
+    	    }
+    	    wordcn++;
+        }
+
+        //learnNet(last_word, word);    //*** this will be in implemented for dynamic models
+        copyHiddenLayerToInput();
+
+        if (last_word!=-1) neu0[last_word].ac=0;  //delete previous activation
+
+        if (word==0) {		//write last sentence log probability / likelihood
+    	    fprintf(flog, "%f\n", senp);
+    	    senp=0;
+	}
+
+        last_word=word;
+
+        for (a=MAX_NGRAM_ORDER-1; a>0; a--) history[a]=history[a-1];
+        history[0]=last_word;
+
+	if (independent && (word==0)) netReset();
+    }
+    fclose(fi);
+    if (use_lmprob) fclose(lmprob);
+
+    if (debug_mode>0) {
+	fprintf(stderr,"\ntest log probability: %f\n", logp);
+	if (use_lmprob) {
+    	    fprintf(stderr,"test log probability given by other lm: %f\n", log_other);
+    	    fprintf(stderr,"test log probability %f*rnn + %f*other_lm: %f\n", lambda, 1-lambda, log_combine);
+	}
+
+	fprintf(stderr,"\nPPL net: %f\n", exp10(-logp/(real)wordcn));
+	if (use_lmprob) {
+    	    fprintf(stderr,"PPL other: %f\n", exp10(-log_other/(real)wordcn));
+    	    fprintf(stderr,"PPL combine: %f\n", exp10(-log_combine/(real)wordcn));
+	}
+    }
+
+    fclose(flog);
+}
+
+void CRnnLM::testGen()
+{
+    int i, word, cla, last_word, wordcn, c, b, a=0;
+    real f, g, sum, val;
+
+    restoreNet();
+
+    word=0;
+    last_word=0;					//last word = end of sentence
+    wordcn=0;
+    copyHiddenLayerToInput();
+    while (wordcn<gen) {
+        computeNet(last_word, 0);		//compute probability distribution
+
+        f=random(0, 1);
+        g=0;
+        i=vocab_size;
+        while ((g<f) && (i<layer2_size)) {
+    	    g+=neu2[i].ac;
+    	    i++;
+        }
+        cla=i-1-vocab_size;
+
+        if (cla>class_size-1) cla=class_size-1;
+        if (cla<0) cla=0;
+
+        //
+        // !!!!!!!!  THIS WILL WORK ONLY IF CLASSES ARE CONTINUALLY DEFINED IN VOCAB !!! (like class 10 = words 11 12 13; not 11 12 16)  !!!!!!!!
+        // forward pass 1->2 for words
+        for (c=0; c<class_cn[cla]; c++) neu2[class_words[cla][c]].ac=0;
+        matrixXvector(neu2, neu1, syn1, layer1_size, class_words[cla][0], class_words[cla][0]+class_cn[cla], 0, layer1_size, 0);
+
+        //apply direct connections to words
+	if (word!=-1) if (direct_size>0) {
+    	    unsigned long long hash[MAX_NGRAM_ORDER];
+
+            for (a=0; a<direct_order; a++) hash[a]=0;
+
+            for (a=0; a<direct_order; a++) {
+                b=0;
+                if (a>0) if (history[a-1]==-1) break;
+                hash[a]=PRIMES[0]*PRIMES[1]*(unsigned long long)(cla+1);
+
+                for (b=1; b<=a; b++) hash[a]+=PRIMES[(a*PRIMES[b]+b)%PRIMES_SIZE]*(unsigned long long)(history[b-1]+1);
+                hash[a]=(hash[a]%(direct_size/2))+(direct_size)/2;
+    	    }
+
+    	    for (c=0; c<class_cn[cla]; c++) {
+        	a=class_words[cla][c];
+
+        	for (b=0; b<direct_order; b++) if (hash[b]) {
+    		    neu2[a].ac+=syn_d[hash[b]];
+            	    hash[b]++;
+        	    hash[b]=hash[b]%direct_size;
+    	        } else break;
+    	    }
+	}
+
+        //activation 2   --softmax on words
+	sum=0;
+    	for (c=0; c<class_cn[cla]; c++) {
+    	    a=class_words[cla][c];
+    	    if (neu2[a].ac>50) neu2[a].ac=50;  //for numerical stability
+    	    if (neu2[a].ac<-50) neu2[a].ac=-50;  //for numerical stability
+    	    val=FAST_EXP(neu2[a].ac);
+    	    sum+=val;
+    	    neu2[a].ac=val;
+    	}
+    	for (c=0; c<class_cn[cla]; c++) neu2[class_words[cla][c]].ac/=sum;
+	//
+
+	f=random(0, 1);
+        g=0;
+        /*i=0;
+        while ((g<f) && (i<vocab_size)) {
+    	    g+=neu2[i].ac;
+    	    i++;
+        }*/
+        for (c=0; c<class_cn[cla]; c++) {
+    	    a=class_words[cla][c];
+    	    g+=neu2[a].ac;
+    	    if (g>f) break;
+        }
+        word=a;
+
+	if (word>vocab_size-1) word=vocab_size-1;
+        if (word<0) word=0;
+
+	//printf("%s %d %d\n", vocab[word].word, cla, word);
+	if (word!=0)
+	    fprintf(stderr,"%s ", vocab[word].word);
+	else
+	    fprintf(stderr,"\n");
+
+        copyHiddenLayerToInput();
+
+        if (last_word!=-1) neu0[last_word].ac=0;  //delete previous activation
+
+        last_word=word;
+
+        for (a=MAX_NGRAM_ORDER-1; a>0; a--) history[a]=history[a-1];
+        history[0]=last_word;
+
+	if (independent && (word==0)) netReset();
+
+        wordcn++;
+    }
 }
