@@ -26,14 +26,6 @@ static union{
 #define EXP_C 60801
 #define FAST_EXP(y) (d2i.n.i = EXP_A*(y)+(1072693248-EXP_C),d2i.d)
 
-///// include blas
-#ifdef USE_BLAS
-extern "C" {
-#include <cblas.h>
-}
-#endif
-//
-
 
 real CRnnLM::random(real min, real max)
 {
