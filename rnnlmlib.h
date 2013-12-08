@@ -251,6 +251,8 @@ public:
 	    free(syn1);
 	    if (sync!=NULL) free(sync);
 
+	    if (syn_cd!=NULL) free(syn_cd);
+
 	    if (syn_d!=NULL) free(syn_d);
 
 	    if (syn_db!=NULL) free(syn_db);
@@ -266,6 +268,7 @@ public:
 	    free(syn0b);
 	    free(syn1b);
 	    if (syncb!=NULL) free(syncb);
+            if (centroid!=NULL) free (centroid);
 	    //
 
 	    for (i=0; i<class_size; i++) free(class_words[i]);
