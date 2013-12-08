@@ -51,6 +51,7 @@ protected:
     char test_file[MAX_STRING];
     char rnnlm_file[MAX_STRING];
     char lmprob_file[MAX_STRING];
+    char compress_file[MAX_STRING];
 
     int rand_seed;
 
@@ -58,6 +59,8 @@ protected:
 
     int version;
     int filetype;
+    int ncluster;
+    int kmean_iter;
 
     int use_lmprob;
     real lambda;
@@ -121,6 +124,8 @@ protected:
     struct synapse *syn1;		//weights between hidden and output layer (or hidden and compression if compression>0)
     struct synapse *sync;		//weights between hidden and compression layer
     direct_t *syn_d;		//direct parameters between input and output layer (similar to Maximum Entropy model parameters)
+    uint8_t *syn_cd;               // compressed direct parameters
+    direct_t *centroid;     
 
     //backup used in training:
     struct neuron *neu0b;
@@ -144,6 +149,8 @@ public:
     CRnnLM()		//constructor initializes variables
     {
 	version=10;
+        ncluster=0;
+        kmean_iter=-1;
 	filetype=TEXT;
 
 	use_lmprob=0;
@@ -155,6 +162,7 @@ public:
 	valid_file[0]=0;
 	test_file[0]=0;
 	rnnlm_file[0]=0;
+        compress_file[0]=0;
 
 	alpha_set=0;
 	train_file_set=0;
@@ -199,6 +207,8 @@ public:
 	syn1=NULL;
 	sync=NULL;
 	syn_d=NULL;
+        syn_cd=NULL;
+        centroid=NULL;
 	syn_db=NULL;
 	//backup
 	neu0b=NULL;
