@@ -927,6 +927,136 @@ void CRnnLM::restoreNet()    //will read whole network structure
     saveWeights();
 
     fclose(fi);
+int compare(const void *x, const void *y)
+{
+  if (*(double*)x == *(double*)y) return 0;
+  if (*(double*)x < *(double*)y) return -1;
+  return 1;
+}
+
+#define OBJFN(i,j) FAST_EXP((double)(fabs(centroid[j]-syn_d[i])))
+
+void CRnnLM::kmean()
+{
+  fprintf(stderr,"Running kmean for optimizing centroids...\n");
+  double err, ppl, bestppl=9999999999;
+
+  int* counts=(int*)calloc(sizeof(int),NUMCENTS);
+  direct_t* tempcent=(direct_t*)calloc(sizeof(direct_t),NUMCENTS);
+  direct_t* bestcent=(direct_t*)calloc(sizeof(direct_t),NUMCENTS);
+
+  long long i;
+  int j,ix,iter=1,bestiter=0;
+  do
+  {
+    err=0;
+
+    // update centroids
+    for (i=0;i<NUMCENTS;i++) centroid[i]=counts[i]? tempcent[i]/counts[i] : centroid[i];
+
+    // sort centroid values
+    qsort (centroid, NUMCENTS, sizeof(direct_t), compare);
+    for (i=0;i<NUMCENTS;i++) fprintf(stderr,"%2.3g ",centroid[i]);
+
+    // clear temp clusters + counts
+    for (i=0;i<NUMCENTS;i++){
+      tempcent[i]=counts[i]=0;
+    }
+
+    // identify closest cluster
+    //stepsize = direct_size/1000000+1;
+    for (i=0,ix=0;i<direct_size;i++)
+    {
+      double min_distance = 999999999999;
+      for (j=0;j<NUMCENTS;j++) {
+        double d = FAST_EXP((double)(fabs(centroid[j]-syn_d[i])));
+        if (d<min_distance){
+          min_distance=d;
+          ix=j;
+        }
+      }
+      counts[ix]++;
+      tempcent[ix]+=syn_d[i];
+      WRITE_SYNCD(i,ix); // update compressed direct connections
+      err+=min_distance;
+    }
+    
+    //fprintf(stderr,"Improving %f\n",olderr-err);
+    //fprintf(stderr,"Avg Error: %f\n",err/direct_size);
+    //fprintf(stderr,"Tot Error: %f\n",err);
+
+    ppl=testNetKMean();
+    if (ppl<bestppl) {
+      bestiter=iter;
+      bestppl=ppl;
+      for (j=0;j<NUMCENTS;j++) bestcent[j]=centroid[j];
+    }
+    fprintf(stderr,"\n\nIter: %d\n",iter);
+    fprintf(stderr,"Perplexity: %4.2f\n",ppl);
+    fprintf(stderr,"Best iteration: %d Perplexity: %4.2f\n\n",bestiter,bestppl);
+
+    iter++;
+  } while (iter<=kmean_iter);
+  fprintf(stderr,"Done!\n");
+
+  free(counts); free(tempcent);
+
+  for (i=0,ix=0;i<direct_size;i++)
+  {
+    double min_distance = 999999999999;
+    for (j=0;j<NUMCENTS;j++) {
+      double d = FAST_EXP((double)(fabs(bestcent[j]-syn_d[i])));
+      if (d<min_distance){
+        min_distance=d;
+        ix=j;
+      }
+    }
+    WRITE_SYNCD(i,ix); // update compressed direct connections
+  }
+  for (i=0;i<NUMCENTS;i++){
+      centroid[i]=bestcent[i];
+    }
+
+  free(bestcent);
+}
+
+void CRnnLM::quantize()
+{
+  long long i;
+
+  // determine min and max
+  float min= 9999999;
+  float max=-9999999;
+  int n=0;
+  for (int a=0;a<direct_size;a++)
+  {
+    if (min>syn_d[a]) min=syn_d[a];
+    if (max<syn_d[a]) max=syn_d[a];
+    if (syn_d[a]==0) n++;
+  }
+  //fprintf(stderr,"Ratio of zeros: %g\n",((double)n)/direct_size);
+
+  if (!syn_cd) syn_cd=(uint8_t *)calloc((long long)((direct_size*ncluster)/8+2), sizeof(uint8_t));
+
+  centroid=(direct_t*)calloc(sizeof(direct_t),NUMCENTS);
+
+  // distribute centroids linearly across whole dynamic range
+  for (int i=0;i<NUMCENTS;i++) {
+    centroid[i]=min+(max-min)*i/(NUMCENTS-1);
+  //  fprintf(stderr,"%g ",centroid[i]);
+  }
+  
+  // quantize compressed direct connections
+  for (i=0;i<direct_size;i++)
+  {
+    int ix=(int)((syn_d[i]-min)/(max-min)*(NUMCENTS-1)-0.5);
+    if (ix<0) ix=0;
+    if (ix>255) ix=255;
+    WRITE_SYNCD(i,ix);
+  }
+  fprintf(stderr,"Model compressed with %d Bits/weight\n",ncluster);
+  setFileType(COMPRESSED);
+  //fprintf(stderr,"Perplexity: %4.2f\n",testNetKMean());
 }
 
 void CRnnLM::netFlush()   //cleans all activations and error vectors
