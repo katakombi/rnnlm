@@ -63,14 +63,19 @@ int main(int argc, char **argv)
     int nbest=0;
     int one_iter=0;
     int anti_k=0;
+    int ncluster=0;
+    int kmean_iter=-1;
 
     char train_file[MAX_STRING];
     char valid_file[MAX_STRING];
     char test_file[MAX_STRING];
     char rnnlm_file[MAX_STRING];
+    char compress_file[MAX_STRING];
     char lmprob_file[MAX_STRING];
 
     FILE *f;
+
+    compress_file[0]=0;
 
     if (argc==1) {
     	//printf("Help\n");
@@ -157,6 +162,18 @@ int main(int argc, char **argv)
     	fprintf(stdout,"\t-dynamic <float>\n");
     	fprintf(stdout,"\t\tSet learning rate for dynamic model updates during testing phase; default is 0 (static model)\n");
 
+
+
+        fprintf(stdout,"\t-compress <int>\n");
+        fprintf(stdout,"\t\tCompress the ME part of an RNNME model (direct connections)\n");
+        fprintf(stdout,"\t\tUse given number of bits for compression (between 3 and 8)\n");
+
+        fprintf(stdout,"\t-kmean <int>\n");
+        fprintf(stdout,"\t\tImprove compression by given number of iterations of kmean clustering\n");
+
+        fprintf(stdout,"\t-write-compressed <file>\n");
+        fprintf(stdout,"\t\tWrite the compressed model to disk\n");
+
     	//
 
     	fprintf(stdout,"Additional parameters:\n");
@@ -170,6 +187,7 @@ int main(int argc, char **argv)
     	fprintf(stdout,"\nExamples:\n");
     	fprintf(stdout,"rnnlm -train train -rnnlm model -valid valid -hidden 50\n");
     	fprintf(stdout,"rnnlm -rnnlm model -test test\n");
+        fprintf(stdout,"rnnlm -rnnlm model -compress 4 -test test\n");
     	fprintf(stdout,"\n");
 
     	return 0;	//***
@@ -360,6 +378,48 @@ int main(int argc, char **argv)
         fprintf(stderr,"Dynamic learning rate: %f\n", dynamic);
     }
 
+
+    //set compress
+    i=argPos((char *)"-compress", argc, argv);
+    if (i>0) {
+        if (i+1==argc) {
+          fprintf(stderr, "ERROR: number of bits not specified!\n");
+          return 0;
+        }
+
+        ncluster=atoi(argv[i+1]);
+
+        if (debug_mode>0)
+        fprintf(stderr,"Number of clustering bits: %d\n", ncluster);
+    }
+
+    //set kmean
+    i=argPos((char *)"-kmean", argc, argv);
+    if (i>0) {
+      if (i+1==argc) {
+        fprintf(stderr,"ERROR: number of iterations not specified!\n");
+        return 0;
+      }
+      
+      kmean_iter=atoi(argv[i+1]);
+
+      if (debug_mode>0)
+        fprintf(stderr,"Using kmean quantization with given number of iterations: %d\n", kmean_iter);
+    }
+
+    //set write-compressed
+    i=argPos((char *)"-write-compressed", argc, argv);
+    if (i>0) {
+      if (i+1==argc) {
+        fprintf(stderr,"ERROR: compressed model filename not specified!\n");
+        return 0;
+      }
+
+      strcpy(compress_file,argv[i+1]);
+
+      if (debug_mode>0)
+        fprintf(stderr,"Writing compressed model to: %s\n", compress_file);
+    }
 
     //set gen
     i=argPos((char *)"-gen", argc, argv);
@@ -677,7 +737,19 @@ int main(int argc, char **argv)
         if (use_lmprob) model1.setLMProbFile(lmprob_file);
         model1.setDebugMode(debug_mode);
 
-	if (nbest==0) model1.testNet();
+	if (nbest==0) {
+          // FIXME this is an ugly hack!
+          if (ncluster!=0) {
+            model1.setNCluster(ncluster);
+            if (kmean_iter>0) model1.setKMean(kmean_iter);
+            model1.setFileType(COMPRESSED);
+          }
+          model1.testNet();
+          if (compress_file[0]!=0) {
+            model1.setRnnLMFile(compress_file);
+            model1.saveNet();
+          }
+        }
 	else model1.testNbest();
     }
 
