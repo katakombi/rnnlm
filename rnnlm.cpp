@@ -76,7 +76,6 @@ int main(int argc, char **argv)
     	//printf("Help\n");
 
     	fprintf(stdout,"Recurrent neural network based language modeling toolkit v 0.3g\n\n");
-    	fprintf(stdout,"Recurrent neural network based language modeling toolkit v 0.3d\n\n");
 
     	fprintf(stdout,"Options:\n");
 
