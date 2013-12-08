@@ -1,0 +1,61 @@
+0.1g:
+- classes at output layer are used to limit computational cost of normalization; speedup ~50x with only small performance loss!
+- discarded -vocab-threshold, -compression
+
+0.1h:
+- loops rewritten; ~20% better performance
+- blas option removed
+- changed output during training
+- progress of training is shown (switch -debug 2)
+- added '-beta' parameter for setting L2 regularization parameter
+- added '-one-iter' parameter: performs one iteration over training data and saves the resulting model; does not use valid data
+- specifying '-alpha' as a parameter now overrides value found in the model file; can be combined with '-one-iter' to perform adaptation on new data
+- added '-min-improvement' parameter to control speed of training process (can be turned off by specifying '-min improvement 1.0')
+- added '-anti-kasparek' option to allow more stability during training in unstable environments (saves model during iterations after processing specified amount of words)
+- improved bptt implementation, more than 3x speed for large bptt values now (controlled by bptt_block defined in rnnlmlib.cpp)
+
+0.2a:
+- improved BPTT implementation, added '-bptt-block N' switch so that error is propagated after N examples, which results to BPTT step + N complexity
+  of training instead of BPTT step * N
+
+0.2b:
+- added '-direct N' parameter to allow direct connections between top N words at input and output layers + between all input words and
+  all classes at output layer (for values >0)
+
+0.2c:
+- added '-independent' switch: sentences are processed independently, with no across sentence boundary information (hidden layer is erased at end of sentence symbol); should be used both for training and test phases
+
+0.3a:
+- rewritten implementation of direct connections; now active neurons are hashed, not all weights (much faster) + added '-direct-order N' parameter, that sets order
+  of dirrect connections (up to 20); this model alone works very well for character-based models (with -class 1 option to switch classes off)
+- weights are now not reloaded if the improvement is too small
+- TODO: include all things from 0.2c version
+
+0.3b:
+- changed few minor things; direct connections are now specified in millions by '-direct N'
+- added modififed '-independent' switch
+
+0.3c:
+- support for binary format of model files: use '-binary' option for training; the resulting model is ~2x smaller and models are saved and loaded several times faster
+- added '-gradient-cutoff' to control maximum size of gradient (to avoid exploding gradient problem)
+- nbest lists can be now read from stdin: use '-nbest - < nbestlist.txt'
+- added support for compression layer using '-compression N' switch, where N is number of neurons; the compression layer is additional hidden layer between recurrent hidden layer and output+class layer; can be used to reduce computational complexity if many classes are used (useful probably only on very large data sets)
+- ME part of the model can now use more than 2^31 (~2G) features
+
+0.3d:
+- few small bugs removed
+- new algorithm for computing classes: works a bit worse (~2% in PPL), but with small hidden layer and large output layer, provides large speed-ups (~2-4x) - thanks to Dan Povey
+- old classes can be used if model is trained with '-old-classes' option
+
+0.3e:
+- parameters -old-classes and -independent are now stored in model file to avoid problems
+- removed bug in generation of words from RNNME models - thanks to YongZhe Shi
+
+0.3f:
+- unofficial version with licensing restrictions held by Microsoft Research
+- supports nonbinary features and word vectors
+
+0.3g:
+- added '-compress' to quantize direct connections, can be combined mit '-kmean' to maintain good performance for small bitsizes (3-5)
+- added '-write-compressed' to save compressed model. Note: compressed models do not work with -train or -one-iter, just with -test
+
