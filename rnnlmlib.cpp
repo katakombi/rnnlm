@@ -2693,7 +2693,11 @@ void CRnnLM::testGen()
 
                     for (b = 0; b < direct_order; b++)
                         if (hash[b]) {
-                            neu2[a].ac += syn_d[hash[b]];
+                            if (filetype == COMPRESSED) {
+                                neu2[a].ac += READ_SYNCD(hash[b]);
+                            } else {
+                                neu2[a].ac += syn_d[hash[b]];
+                            }
                             hash[b]++;
                             hash[b] = hash[b] % direct_size;
                         } else
