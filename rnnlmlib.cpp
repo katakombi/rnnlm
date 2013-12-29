@@ -2742,9 +2742,9 @@ void CRnnLM::testGen()
 
         //printf("%s %d %d\n", vocab[word].word, cla, word);
         if (word != 0)
-            fprintf(stderr, "%s ", vocab[word].word);
+            fprintf(stdout, "%s ", vocab[word].word);
         else
-            fprintf(stderr, "\n");
+            fprintf(stdout, "\n");
 
         copyHiddenLayerToInput();
 
