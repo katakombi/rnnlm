@@ -1457,9 +1457,9 @@ void CRnnLM::learnNet(int last_word, int word)
     //compute error vectors
     for (c = 0; c < class_cn[vocab[word].class_index]; c++) {
         a = class_words[vocab[word].class_index][c];
-        neu2[a].er = (0 - neu2[a].ac);
+        neu2[a].er = (0 - neu2[a].ac) * alpha;
     }
-    neu2[word].er = (1 - neu2[word].ac);    //word part
+    neu2[word].er = (1 - neu2[word].ac) * alpha;    //word part
 
     //flush error
     for (a = 0; a < layer1_size; a++)
@@ -1468,9 +1468,9 @@ void CRnnLM::learnNet(int last_word, int word)
         neuc[a].er = 0;
 
     for (a = vocab_size; a < layer2_size; a++) {
-        neu2[a].er = (0 - neu2[a].ac);
+        neu2[a].er = (0 - neu2[a].ac) * alpha;
     }
-    neu2[vocab[word].class_index + vocab_size].er = (1 - neu2[vocab[word].class_index + vocab_size].ac);    //class part
+    neu2[vocab[word].class_index + vocab_size].er = (1 - neu2[vocab[word].class_index + vocab_size].ac) * alpha;    //class part
 
     //
     if (direct_size > 0) {      //learn direct connections between words
