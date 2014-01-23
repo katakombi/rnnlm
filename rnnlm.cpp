@@ -15,6 +15,7 @@
 #include <math.h>
 #include <fstream>
 #include <iostream>
+#include <limits.h>
 #include "rnnlmlib.h"
 
 using namespace std;
@@ -65,6 +66,7 @@ int main(int argc, char **argv)
     int rand_seed = 1;
     int nbest = 0;
     int one_iter = 0;
+    int max_iter = INT_MAX;
     int anti_k = 0;
     int ncluster = 0;
     int kmean_iter = -1;
@@ -146,6 +148,9 @@ int main(int argc, char **argv)
         fprintf(stdout, "\t-one-iter\n");
         fprintf(stdout,
                 "\t\tWill cause training to perform exactly one iteration over training data (useful for adapting final models on different data etc.)\n");
+
+    	printf("\t-max-iter\n");
+    	printf("\t\tWill cause training to perform exactly <max-iter> iterations over training data (useful to test static learning rates if min-improvement is set to 0.0)\n");
 
         fprintf(stdout, "\t-anti-kasparek <int>\n");
         fprintf(stdout,
@@ -264,6 +269,21 @@ int main(int argc, char **argv)
 
         if (debug_mode > 0)
             fprintf(stderr, "Training for one iteration\n");
+    }
+
+    //set max-iter
+    i=argPos((char *)"-max-iter", argc, argv);
+    if (i>0) {
+
+        if (i+1==argc) {
+            printf("ERROR: maximum number of iterations not specified!\n");
+            return 0;
+        }
+
+        max_iter=atoi(argv[i+1]);
+
+        if (debug_mode>0)
+        printf("Maximum number of iterations: %d\n", max_iter);
     }
 
     //search for validation file
@@ -711,6 +731,7 @@ int main(int argc, char **argv)
         model1.setFileType(fileformat);
 
         model1.setOneIter(one_iter);
+        model1.setMaxIter(max_iter);
         if (one_iter == 0)
             model1.setValidFile(valid_file);
 

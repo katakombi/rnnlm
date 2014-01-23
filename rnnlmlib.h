@@ -99,6 +99,7 @@ class CRnnLM {
     int counter;
 
     int one_iter;
+    int max_iter;
     int anti_k;
 
     real beta;
@@ -248,6 +249,7 @@ class CRnnLM {
          old_classes = 0;
 
          one_iter = 0;
+         max_iter = 0;
 
          debug_mode = 1;
          srand(rand_seed);
@@ -394,6 +396,9 @@ class CRnnLM {
     }
     void setOneIter(int newOneIter) {
         one_iter = newOneIter;
+    }
+    void setMaxIter(int newMaxIter) {
+        max_iter = newMaxIter;
     }
     void setNCluster(int newNCluster) {
         ncluster = newNCluster;
