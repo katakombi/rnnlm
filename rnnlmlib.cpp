@@ -1214,163 +1214,51 @@ void CRnnLM::netReset()         //cleans hidden layer activation + bptt history
         history[a] = 0;
 }
 
-void CRnnLM::matrixXvector(struct neuron *dest, struct neuron *srcvec,
-                           struct synapse *srcmatrix, int matrix_width,
-                           int from, int to, int from2, int to2, int type)
+void CRnnLM::matrixXvector(struct neuron *dest, struct neuron *srcvec, struct synapse *srcmatrix, int matrix_width, int from, int to, int from2, int to2, int type)
 {
-    int a, b;
-    real val1, val2, val3, val4;
-    real val5, val6, val7, val8;
+    int a, b, c;
+    real val[STRIDE];
 
-    if (type == 0) {            //ac mod
-        for (b = 0; b < (to - from) / 8; b++) {
-            val1 = 0;
-            val2 = 0;
-            val3 = 0;
-            val4 = 0;
-
-            val5 = 0;
-            val6 = 0;
-            val7 = 0;
-            val8 = 0;
-
-            for (a = from2; a < to2; a++) {
-                val1 +=
-                    srcvec[a].ac * srcmatrix[a +
-                                             (b * 8 + from +
-                                              0) * matrix_width].weight;
-                val2 +=
-                    srcvec[a].ac * srcmatrix[a +
-                                             (b * 8 + from +
-                                              1) * matrix_width].weight;
-                val3 +=
-                    srcvec[a].ac * srcmatrix[a +
-                                             (b * 8 + from +
-                                              2) * matrix_width].weight;
-                val4 +=
-                    srcvec[a].ac * srcmatrix[a +
-                                             (b * 8 + from +
-                                              3) * matrix_width].weight;
-
-                val5 +=
-                    srcvec[a].ac * srcmatrix[a +
-                                             (b * 8 + from +
-                                              4) * matrix_width].weight;
-                val6 +=
-                    srcvec[a].ac * srcmatrix[a +
-                                             (b * 8 + from +
-                                              5) * matrix_width].weight;
-                val7 +=
-                    srcvec[a].ac * srcmatrix[a +
-                                             (b * 8 + from +
-                                              6) * matrix_width].weight;
-                val8 +=
-                    srcvec[a].ac * srcmatrix[a +
-                                             (b * 8 + from +
-                                              7) * matrix_width].weight;
-            }
-            dest[b * 8 + from + 0].ac += val1;
-            dest[b * 8 + from + 1].ac += val2;
-            dest[b * 8 + from + 2].ac += val3;
-            dest[b * 8 + from + 3].ac += val4;
-
-            dest[b * 8 + from + 4].ac += val5;
-            dest[b * 8 + from + 5].ac += val6;
-            dest[b * 8 + from + 6].ac += val7;
-            dest[b * 8 + from + 7].ac += val8;
+    if (type==0) {              //ac mod
+        for (b = 0; b < to - from - STRIDE; b += STRIDE) {
+            for (c = 0; c < STRIDE; c++) val[c]=0;
+            for (a = from2; a < to2; a++) for (c = 0; c < STRIDE; c++) val[c] += srcvec[a].ac * srcmatrix[a+(b+from+c)*matrix_width].weight;
+            for (c = 0; c < STRIDE; c++) dest[b+from+c].ac += val[c];
         }
-
-        for (b = b * 8; b < to - from; b++) {
-            for (a = from2; a < to2; a++) {
-                dest[b + from].ac +=
-                    srcvec[a].ac * srcmatrix[a +
-                                             (b + from) * matrix_width].weight;
-            }
+        for (; b < to - from; b++) for (a = from2; a < to2; a++) dest[b+from].ac += srcvec[a].ac * srcmatrix[a+(b+from)*matrix_width].weight;
+    }
+    else {              //er mod
+        for (a = 0; a < to2 - from2 - STRIDE; a += STRIDE) {
+            for (c = 0; c < STRIDE; c++) val[c]=0;
+            for (b = from; b < to; b++) for (c = 0; c < STRIDE; c++) val[c] += srcvec[b].er * srcmatrix[a+from2+c+b*matrix_width].weight;
+            for (c = 0; c < STRIDE; c++) dest[a+from2+c].er += val[c];
         }
-    } else {                    //er mod
-        for (a = 0; a < (to2 - from2) / 8; a++) {
-            val1 = 0;
-            val2 = 0;
-            val3 = 0;
-            val4 = 0;
-
-            val5 = 0;
-            val6 = 0;
-            val7 = 0;
-            val8 = 0;
-
-            for (b = from; b < to; b++) {
-                val1 +=
-                    srcvec[b].er * srcmatrix[a * 8 + from2 + 0 +
-                                             b * matrix_width].weight;
-                val2 +=
-                    srcvec[b].er * srcmatrix[a * 8 + from2 + 1 +
-                                             b * matrix_width].weight;
-                val3 +=
-                    srcvec[b].er * srcmatrix[a * 8 + from2 + 2 +
-                                             b * matrix_width].weight;
-                val4 +=
-                    srcvec[b].er * srcmatrix[a * 8 + from2 + 3 +
-                                             b * matrix_width].weight;
-
-                val5 +=
-                    srcvec[b].er * srcmatrix[a * 8 + from2 + 4 +
-                                             b * matrix_width].weight;
-                val6 +=
-                    srcvec[b].er * srcmatrix[a * 8 + from2 + 5 +
-                                             b * matrix_width].weight;
-                val7 +=
-                    srcvec[b].er * srcmatrix[a * 8 + from2 + 6 +
-                                             b * matrix_width].weight;
-                val8 +=
-                    srcvec[b].er * srcmatrix[a * 8 + from2 + 7 +
-                                             b * matrix_width].weight;
-            }
-            dest[a * 8 + from2 + 0].er += val1;
-            dest[a * 8 + from2 + 1].er += val2;
-            dest[a * 8 + from2 + 2].er += val3;
-            dest[a * 8 + from2 + 3].er += val4;
-
-            dest[a * 8 + from2 + 4].er += val5;
-            dest[a * 8 + from2 + 5].er += val6;
-            dest[a * 8 + from2 + 6].er += val7;
-            dest[a * 8 + from2 + 7].er += val8;
-        }
-
-        for (a = a * 8; a < to2 - from2; a++) {
-            for (b = from; b < to; b++) {
-                dest[a + from2].er +=
-                    srcvec[b].er * srcmatrix[a + from2 +
-                                             b * matrix_width].weight;
-            }
-        }
+        for (; a < to2 - from2; a++) for (b = from; b < to; b++) dest[a+from2].er += srcvec[b].er * srcmatrix[a+from2+b*matrix_width].weight;
 
         if (gradient_cutoff > 0)
-            for (a = from2; a < to2; a++) {
-                if (dest[a].er > gradient_cutoff)
-                    dest[a].er = gradient_cutoff;
-                if (dest[a].er < -gradient_cutoff)
-                    dest[a].er = -gradient_cutoff;
-            }
+        for (a = from2; a < to2; a++) {
+            if (dest[a].er > gradient_cutoff) dest[a].er = gradient_cutoff;
+            if (dest[a].er < -gradient_cutoff) dest[a].er = -gradient_cutoff;
+        }
     }
 
     //this is normal implementation (about 3x slower):
 
-    /*if (type==0) {        //ac mod
-       for (b=from; b<to; b++) {
-       for (a=from2; a<to2; a++) {
-       dest[b].ac += srcvec[a].ac * srcmatrix[a+b*matrix_width].weight;
-       }
-       }
-       }
-       else         //er mod
-       if (type==1) {
-       for (a=from2; a<to2; a++) {
-       for (b=from; b<to; b++) {
-       dest[a].er += srcvec[b].er * srcmatrix[a+b*matrix_width].weight;
-       }
-       }
-       } */
+    /*if (type==0) {            //ac mod
+        for (b=from; b<to; b++) {
+            for (a=from2; a<to2; a++) {
+                dest[b].ac += srcvec[a].ac * srcmatrix[a+b*matrix_width].weight;
+            }
+        }
+    }
+    else                //er mod
+    if (type==1) {
+        for (a=from2; a<to2; a++) {
+            for (b=from; b<to; b++) {
+                dest[a].er += srcvec[b].er * srcmatrix[a+b*matrix_width].weight;
+            }
+        }
+    }*/
 }
 
 void CRnnLM::computeNet(int last_word, int word)
