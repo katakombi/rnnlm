@@ -1502,8 +1502,7 @@ void CRnnLM::learnNet(int last_word, int word)
 
                 for (b = 0; b < direct_order; b++)
                     if (hash[b]) {
-                        syn_d[hash[b]] +=
-                            alpha * neu2[a].er - syn_d[hash[b]] * beta3;
+                        syn_d[hash[b]] += neu2[a].er - syn_d[hash[b]] * beta3;
                         hash[b]++;
                         hash[b] = hash[b] % direct_size;
                     } else
@@ -1538,8 +1537,7 @@ void CRnnLM::learnNet(int last_word, int word)
         for (a = vocab_size; a < layer2_size; a++) {
             for (b = 0; b < direct_order; b++)
                 if (hash[b]) {
-                    syn_d[hash[b]] +=
-                        alpha * neu2[a].er - syn_d[hash[b]] * beta3;
+                    syn_d[hash[b]] += neu2[a].er - syn_d[hash[b]] * beta3;
                     hash[b]++;
                 } else
                     break;
@@ -1558,13 +1556,10 @@ void CRnnLM::learnNet(int last_word, int word)
             b = class_words[vocab[word].class_index][c];
             if ((counter % 10) == 0)    //regularization is done every 10. step
                 for (a = 0; a < layerc_size; a++)
-                    sync[a + t].weight +=
-                        alpha * neu2[b].er * neuc[a].ac - sync[a +
-                                                               t].weight *
-                        beta2;
+                    sync[a + t].weight += neu2[b].er * neuc[a].ac - sync[a + t].weight * beta2;
             else
                 for (a = 0; a < layerc_size; a++)
-                    sync[a + t].weight += alpha * neu2[b].er * neuc[a].ac;
+                    sync[a + t].weight += neu2[b].er * neuc[a].ac;
             t += layerc_size;
         }
         //
@@ -1574,10 +1569,10 @@ void CRnnLM::learnNet(int last_word, int word)
         for (b = vocab_size; b < layer2_size; b++) {
             if ((counter % 10) == 0) {  //regularization is done every 10. step
                 for (a = 0; a < layerc_size; a++)
-                    sync[a + c].weight += alpha * neu2[b].er * neuc[a].ac - sync[a + c].weight * beta2; //weight c->2 update
+                    sync[a + c].weight += neu2[b].er * neuc[a].ac - sync[a + c].weight * beta2; //weight c->2 update
             } else {
                 for (a = 0; a < layerc_size; a++)
-                    sync[a + c].weight += alpha * neu2[b].er * neuc[a].ac;  //weight c->2 update
+                    sync[a + c].weight += neu2[b].er * neuc[a].ac;  //weight c->2 update
             }
             c += layerc_size;
         }
@@ -1591,7 +1586,7 @@ void CRnnLM::learnNet(int last_word, int word)
 
         for (b = 0; b < layerc_size; b++) {
             for (a = 0; a < layer1_size; a++)
-                syn1[a + b * layer1_size].weight += alpha * neuc[b].er * neu1[a].ac;    //weight 1->c update
+                syn1[a + b * layer1_size].weight += neuc[b].er * neu1[a].ac;    //weight 1->c update
         }
     } else {
         matrixXvector(neu1, neu2, syn1, layer1_size,
@@ -1604,13 +1599,10 @@ void CRnnLM::learnNet(int last_word, int word)
             b = class_words[vocab[word].class_index][c];
             if ((counter % 10) == 0)    //regularization is done every 10. step
                 for (a = 0; a < layer1_size; a++)
-                    syn1[a + t].weight +=
-                        alpha * neu2[b].er * neu1[a].ac - syn1[a +
-                                                               t].weight *
-                        beta2;
+                    syn1[a + t].weight += neu2[b].er * neu1[a].ac - syn1[a + t].weight * beta2;
             else
                 for (a = 0; a < layer1_size; a++)
-                    syn1[a + t].weight += alpha * neu2[b].er * neu1[a].ac;
+                    syn1[a + t].weight += neu2[b].er * neu1[a].ac;
             t += layer1_size;
         }
         //
@@ -1620,10 +1612,10 @@ void CRnnLM::learnNet(int last_word, int word)
         for (b = vocab_size; b < layer2_size; b++) {
             if ((counter % 10) == 0) {  //regularization is done every 10. step
                 for (a = 0; a < layer1_size; a++)
-                    syn1[a + c].weight += alpha * neu2[b].er * neu1[a].ac - syn1[a + c].weight * beta2; //weight 1->2 update
+                    syn1[a + c].weight += neu2[b].er * neu1[a].ac - syn1[a + c].weight * beta2; //weight 1->2 update
             } else {
                 for (a = 0; a < layer1_size; a++)
-                    syn1[a + c].weight += alpha * neu2[b].er * neu1[a].ac;  //weight 1->2 update
+                    syn1[a + c].weight += neu2[b].er * neu1[a].ac;  //weight 1->2 update
             }
             c += layer1_size;
         }
@@ -1642,30 +1634,20 @@ void CRnnLM::learnNet(int last_word, int word)
         if (a != -1) {
             if ((counter % 10) == 0)
                 for (b = 0; b < layer1_size; b++)
-                    syn0[a + b * layer0_size].weight +=
-                        alpha * neu1[b].er * neu0[a].ac - syn0[a +
-                                                               b *
-                                                               layer0_size].
-                        weight * beta2;
+                    syn0[a + b * layer0_size].weight += neu1[b].er * neu0[a].ac - syn0[a + b * layer0_size].weight * beta2;
             else
                 for (b = 0; b < layer1_size; b++)
-                    syn0[a + b * layer0_size].weight +=
-                        alpha * neu1[b].er * neu0[a].ac;
+                    syn0[a + b * layer0_size].weight += neu1[b].er * neu0[a].ac;
         }
 
         if ((counter % 10) == 0) {
             for (b = 0; b < layer1_size; b++)
                 for (a = layer0_size - layer1_size; a < layer0_size; a++)
-                    syn0[a + b * layer0_size].weight +=
-                        alpha * neu1[b].er * neu0[a].ac - syn0[a +
-                                                               b *
-                                                               layer0_size].
-                        weight * beta2;
+                    syn0[a + b * layer0_size].weight += neu1[b].er * neu0[a].ac - syn0[a + b * layer0_size].weight * beta2;
         } else {
             for (b = 0; b < layer1_size; b++)
                 for (a = layer0_size - layer1_size; a < layer0_size; a++)
-                    syn0[a + b * layer0_size].weight +=
-                        alpha * neu1[b].er * neu0[a].ac;
+                    syn0[a + b * layer0_size].weight += neu1[b].er * neu0[a].ac;
         }
     } else                      //BPTT
     {
@@ -1683,7 +1665,7 @@ void CRnnLM::learnNet(int last_word, int word)
                 a = bptt_history[step];
                 if (a != -1)
                     for (b = 0; b < layer1_size; b++) {
-                        bptt_syn0[a + b * layer0_size].weight += alpha * neu1[b].er;    //*neu0[a].ac; --should be always set to 1
+                        bptt_syn0[a + b * layer0_size].weight += neu1[b].er;    //*neu0[a].ac; --should be always set to 1
                     }
 
                 for (a = layer0_size - layer1_size; a < layer0_size; a++)
@@ -1693,8 +1675,7 @@ void CRnnLM::learnNet(int last_word, int word)
                 for (b = 0; b < layer1_size; b++)
                     for (a = layer0_size - layer1_size; a < layer0_size; a++) {
                         //neu0[a].er += neu1[b].er * syn0[a+b*layer0_size].weight;
-                        bptt_syn0[a + b * layer0_size].weight +=
-                            alpha * neu1[b].er * neu0[a].ac;
+                        bptt_syn0[a + b * layer0_size].weight += neu1[b].er * neu0[a].ac;
                     }
 
                 for (a = 0; a < layer1_size; a++) { //propagate error from time T-n to T-n-1
@@ -1705,8 +1686,7 @@ void CRnnLM::learnNet(int last_word, int word)
 
                 if (step < bptt + bptt_block - 3)
                     for (a = 0; a < layer1_size; a++) {
-                        neu1[a].ac =
-                            bptt_hidden[(step + 1) * layer1_size + a].ac;
+                        neu1[a].ac = bptt_hidden[(step + 1) * layer1_size + a].ac;
                         neu0[a + layer0_size - layer1_size].ac =
                             bptt_hidden[(step + 2) * layer1_size + a].ac;
                     }
