@@ -61,7 +61,7 @@ const unsigned int PRIMES_SIZE = sizeof(PRIMES) / sizeof(PRIMES[0]);
 
 const int MAX_NGRAM_ORDER = 20;
 
-enum FileTypeEnum { TEXT, BINARY, COMPRESSED }; //COMPRESSED not yet implemented
+enum FileTypeEnum { TEXT, BINARY, COMPRESSED }; //COMPRESSED is read-only
 
 class CRnnLM {
  protected:
