@@ -1032,7 +1032,7 @@ int compare(const void *x, const void *y)
 void CRnnLM::kmean()
 {
     fprintf(stderr, "Running kmean for optimizing centroids...\n");
-    double err, ppl, bestppl = 9999999999;
+    double err, ppl, bestppl = INT_MAX;
 
     int *counts = (int *)calloc(sizeof(int), NUMCENTS);
     direct_t *tempcent = (direct_t *) calloc(sizeof(direct_t), NUMCENTS);
@@ -1060,7 +1060,7 @@ void CRnnLM::kmean()
         // identify closest cluster
         //stepsize = direct_size/1000000+1;
         for (i = 0, ix = 0; i < direct_size; i++) {
-            double min_distance = 999999999999;
+            double min_distance = FLT_MAX;
             for (j = 0; j < NUMCENTS; j++) {
                 double d = fasterexp(fabs(centroid[j] - syn_d[i]));
                 if (d < min_distance) {
@@ -1098,7 +1098,7 @@ void CRnnLM::kmean()
     free(tempcent);
 
     for (i = 0, ix = 0; i < direct_size; i++) {
-        double min_distance = 999999999999;
+        double min_distance = FLT_MAX;
         for (j = 0; j < NUMCENTS; j++) {
             double d = fasterexp(fabs(bestcent[j] - syn_d[i]));
             if (d < min_distance) {
@@ -1120,8 +1120,8 @@ void CRnnLM::quantize()
     long long i;
 
     // determine min and max
-    float min = 9999999;
-    float max = -9999999;
+    float min = FLT_MAX;
+    float max = -FLT_MAX;
     int n = 0;
     for (int a = 0; a < direct_size; a++) {
         if (min > syn_d[a])

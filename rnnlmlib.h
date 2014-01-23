@@ -13,6 +13,7 @@
 #define _RNNLMLIB_H_
 
 #include <stdint.h>
+#include <limits.h>
 
 #define MAX_STRING 100
 #define exp10(a) pow(10.0, a)
