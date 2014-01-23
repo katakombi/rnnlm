@@ -1806,7 +1806,7 @@ void CRnnLM::trainNet()
 
     //saveNet();
 
-    while (1) {
+    while (iter < max_iter) {
         fprintf(stderr, "Iter: %3d\tAlpha: %f\t   ", iter, alpha);
         fflush(stdout);
 
@@ -2381,7 +2381,7 @@ void CRnnLM::testNbest()
 void CRnnLM::testGen()
 {
     int i, word, cla, last_word, wordcn, c, b, a = 0;
-    real f, g, sum, val;
+    real f, g, sum;
 
     restoreNet();
 
