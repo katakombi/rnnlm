@@ -1,7 +1,7 @@
 CC = g++
 WEIGHTTYPE = float
 STRIDE = 8
-CFLAGS = -D WEIGHTTYPE=$(WEIGHTTYPE) -D STRIDE=$(STRIDE) -lm -Ofast -march=native -Wall -funroll-loops -ffast-math -Wno-unused-result
+CFLAGS = -D WEIGHTTYPE=$(WEIGHTTYPE) -D STRIDE=$(STRIDE) -lm -Ofast -march=native -Wall -funroll-loops -ffast-math -Wno-unused-result -Wno-narrowing
 #CFLAGS = -lm -O2 -Wall
 
 all: rnnlmlib.o rnnlm
