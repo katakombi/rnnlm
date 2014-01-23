@@ -59,3 +59,22 @@
 - added '-compress' to quantize direct connections, can be combined mit '-kmean' to maintain good performance for small bitsizes (3-5)
 - added '-write-compressed' to save compressed model. Note: compressed models do not work with -train or -one-iter, just with -test
 
+0.4a (see CHANGE-Cantab.log for details):
+- switched to using floats instead of doubles for speed and size
+- an even faster exp function used (from Paul Mineiro - http://www.machinedlearnings.com/2011/06/fast-approximate-logarithm-exponential.html)
+- safe softmax implemented
+- max-iter added (if -min-improvement set to 0.0 this allows for tests where training has a static learning rate and proceeds for a set number of iterations)
+- fixed bug in example.sh for first invocation
+
+0.4b (see CHANGE-Cantab.log for details):
+- now use make  make CC=g++ WEIGHTTYPE=float to get float weights and direct connections (default is double)
+
+0.4c:
+- updated makefile, added options -Ofast -march=native (~30% faster training, but will require gcc 4.7+)
+- some loop unrolling that seems to help a bit on small training datasets (might be worth to test more if this helps also on larger datasets)
+- added STRIDE option to makefile which allows user to set manually how much unrolling is done in the matrix multiplication
+  (higher values seem to be useful for models with large hidden layer, in some cases tuning this value can give another ~20% speedup)
+
+0.4d:
+- Merge of 0.4c and 0.3g code bases
+- Minor cleanups in clustering code
