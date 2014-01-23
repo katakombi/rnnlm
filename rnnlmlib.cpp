@@ -1,9 +1,10 @@
 ///////////////////////////////////////////////////////////////////////
 //
 // Recurrent neural network based statistical language modeling toolkit
-// Version 0.3g
+// Version 0.4d
 // (c) 2010-2012 Tomas Mikolov (tmikolov@gmail.com)
 // (c) 2013      Stefan Kombrink (katakombi@gmail.com)
+// (c) 2013 Cantab Research Ltd (info@cantabResearch.com)
 // Coding Style: indent rnnlm.cpp -linux -nut -o -ts4 -i4
 //
 ///////////////////////////////////////////////////////////////////////
