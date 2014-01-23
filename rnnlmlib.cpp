@@ -1352,18 +1352,16 @@ void CRnnLM::computeNet(int last_word, int word)
         }
     }
     //activation 2   --softmax on classes
-    sum = 0;
-    for (a = vocab_size; a < layer2_size; a++) {
-        if (neu2[a].ac > 50)
-            neu2[a].ac = 50;    //for numerical stability
-        if (neu2[a].ac < -50)
-            neu2[a].ac = -50;   //for numerical stability
-        val = fasterexp(neu2[a].ac);
-        sum += val;
-        neu2[a].ac = val;
-    }
-    for (a = vocab_size; a < layer2_size; a++)
-        neu2[a].ac /= sum;      //output layer activations now sum exactly to 1
+    // 20130425 - this is now a 'safe' softmax
+
+    sum=0;
+    real maxAc=-FLT_MAX;
+    for (a=vocab_size; a<layer2_size; a++)
+        if (neu2[a].ac>maxAc) maxAc=neu2[a].ac; //this prevents the need to check for overflow
+    for (a=vocab_size; a<layer2_size; a++)
+        sum+=fasterexp(neu2[a].ac-maxAc);
+    for (a=vocab_size; a<layer2_size; a++)
+        neu2[a].ac=fasterexp(neu2[a].ac-maxAc)/sum;
 
     if (gen > 0)
         return;                 //if we generate words, we don't know what current word is -> only classes are estimated and word is selected in testGen()
@@ -1426,20 +1424,22 @@ void CRnnLM::computeNet(int last_word, int word)
             }
         }
     //activation 2   --softmax on words
-    sum = 0;
-    if (word != -1) {
-        for (c = 0; c < class_cn[vocab[word].class_index]; c++) {
-            a = class_words[vocab[word].class_index][c];
-            if (neu2[a].ac > 50)
-                neu2[a].ac = 50;    //for numerical stability
-            if (neu2[a].ac < -50)
-                neu2[a].ac = -50;   //for numerical stability
-            val = fasterexp(neu2[a].ac);
-            sum += val;
-            neu2[a].ac = val;
+    // 130425 - this is now a 'safe' softmax
+    sum=0;
+    if (word!=-1) { 
+        maxAc=-FLT_MAX;
+        for (c=0; c<class_cn[vocab[word].class_index]; c++) {
+            a=class_words[vocab[word].class_index][c];
+            if (neu2[a].ac>maxAc) maxAc=neu2[a].ac;
         }
-        for (c = 0; c < class_cn[vocab[word].class_index]; c++)
-            neu2[class_words[vocab[word].class_index][c]].ac /= sum;
+        for (c=0; c<class_cn[vocab[word].class_index]; c++) {
+            a=class_words[vocab[word].class_index][c];
+            sum+=fasterexp(neu2[a].ac-maxAc);
+        }
+        for (c=0; c<class_cn[vocab[word].class_index]; c++) {
+            a=class_words[vocab[word].class_index][c];
+            neu2[a].ac=fasterexp(neu2[a].ac-maxAc)/sum; //this prevents the need to check for overflow
+        }
     }
 }
 
@@ -2584,20 +2584,22 @@ void CRnnLM::testGen()
                 }
             }
         //activation 2   --softmax on words
-        sum = 0;
-        for (c = 0; c < class_cn[cla]; c++) {
-            a = class_words[cla][c];
-            if (neu2[a].ac > 50)
-                neu2[a].ac = 50;    //for numerical stability
-            if (neu2[a].ac < -50)
-                neu2[a].ac = -50;   //for numerical stability
-            val = fasterexp(neu2[a].ac);
-            sum += val;
-            neu2[a].ac = val;
+        // 130425 - this is now a 'safe' softmax
+
+        sum=0;
+        real maxAc=-FLT_MAX;
+      	for (c=0; c<class_cn[cla]; c++) {
+      	    a=class_words[cla][c];
+            if (neu2[a].ac>maxAc) maxAc=neu2[a].ac;
         }
-        for (c = 0; c < class_cn[cla]; c++)
-            neu2[class_words[cla][c]].ac /= sum;
-        //
+        for (c=0; c<class_cn[cla]; c++) {
+            a=class_words[cla][c];
+            sum+=fasterexp(neu2[a].ac-maxAc);
+        }
+        for (c=0; c<class_cn[cla]; c++) {
+            a=class_words[cla][c];
+            neu2[a].ac=fasterexp(neu2[a].ac-maxAc)/sum; //this prevents the need to check for overflow
+        }
 
         f = random(0, 1);
         g = 0;
