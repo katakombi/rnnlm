@@ -17,8 +17,17 @@
 #define MAX_STRING 100
 #define exp10(a) pow(10.0, a)
 
-typedef double real;            // doubles for NN weights
-typedef double direct_t;        // doubles for ME weights; TODO: check why floats are not enough for RNNME (convergence problems)
+#ifndef WEIGHTTYPE
+#define WEIGHTTYPE double
+#endif
+
+// longer STRIDE speeds up computation for models with large hidden layer
+#ifndef STRIDE
+#define STRIDE 8
+#endif
+
+typedef WEIGHTTYPE real;	// NN weights
+typedef WEIGHTTYPE direct_t;	// ME weights
 
 struct neuron {
     real ac;                    //actual value stored in neuron

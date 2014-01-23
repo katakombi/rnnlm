@@ -15,22 +15,12 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <cfloat>
+#include "fastexp.h"
 #include "rnnlmlib.h"
 
-///// fast exp() implementation
-static union {
-    double d;
-    struct {
-        int j, i;
-    } n;
-} d2i;
 
 #define NUMCENTS (1<<ncluster)
-
-#define EXP_A (1048576/M_LN2)
-#define EXP_C 60801
-#define FAST_EXP(y) (d2i.n.i = EXP_A*(y)+(1072693248-EXP_C),d2i.d)
-
 #define READ_SYNCD(x) ( ( ((uint16_t*)(syn_cd+((x)*ncluster)/8))[0] >> ((x)*ncluster%8) ) & (((uint16_t)(1<<ncluster))-1) )
 #define WRITE_SYNCD(x,y) { uint16_t z = ((uint16_t*)(syn_cd+(((x)*ncluster)/8)))[0] &=~(((uint16_t)(1<<ncluster)-1)<<((x)*ncluster%8)); \
                            ((uint16_t*)(syn_cd+(((x)*ncluster)/8)))[0]=z^(((uint16_t)(y))<<((x)*ncluster%8)); }
@@ -1037,7 +1027,7 @@ int compare(const void *x, const void *y)
     return 1;
 }
 
-#define OBJFN(i,j) FAST_EXP((double)(fabs(centroid[j]-syn_d[i])))
+#define OBJFN(i,j) fasterexp(fabs(centroid[j]-syn_d[i]))
 
 void CRnnLM::kmean()
 {
@@ -1072,7 +1062,7 @@ void CRnnLM::kmean()
         for (i = 0, ix = 0; i < direct_size; i++) {
             double min_distance = 999999999999;
             for (j = 0; j < NUMCENTS; j++) {
-                double d = FAST_EXP((double)(fabs(centroid[j] - syn_d[i])));
+                double d = fasterexp(fabs(centroid[j] - syn_d[i]));
                 if (d < min_distance) {
                     min_distance = d;
                     ix = j;
@@ -1110,7 +1100,7 @@ void CRnnLM::kmean()
     for (i = 0, ix = 0; i < direct_size; i++) {
         double min_distance = 999999999999;
         for (j = 0; j < NUMCENTS; j++) {
-            double d = FAST_EXP((double)(fabs(bestcent[j] - syn_d[i])));
+            double d = fasterexp(fabs(bestcent[j] - syn_d[i]));
             if (d < min_distance) {
                 min_distance = d;
                 ix = j;
@@ -1414,7 +1404,7 @@ void CRnnLM::computeNet(int last_word, int word)
         if (neu1[a].ac < -50)
             neu1[a].ac = -50;   //for numerical stability
         val = -neu1[a].ac;
-        neu1[a].ac = 1 / (1 + FAST_EXP(val));
+        neu1[a].ac = 1 / (1 + fasterexp(val));
     }
 
     if (layerc_size > 0) {
@@ -1427,7 +1417,7 @@ void CRnnLM::computeNet(int last_word, int word)
             if (neuc[a].ac < -50)
                 neuc[a].ac = -50;   //for numerical stability
             val = -neuc[a].ac;
-            neuc[a].ac = 1 / (1 + FAST_EXP(val));
+            neuc[a].ac = 1 / (1 + fasterexp(val));
         }
     }
     //1->2 class
@@ -1480,7 +1470,7 @@ void CRnnLM::computeNet(int last_word, int word)
             neu2[a].ac = 50;    //for numerical stability
         if (neu2[a].ac < -50)
             neu2[a].ac = -50;   //for numerical stability
-        val = FAST_EXP(neu2[a].ac);
+        val = fasterexp(neu2[a].ac);
         sum += val;
         neu2[a].ac = val;
     }
@@ -1556,7 +1546,7 @@ void CRnnLM::computeNet(int last_word, int word)
                 neu2[a].ac = 50;    //for numerical stability
             if (neu2[a].ac < -50)
                 neu2[a].ac = -50;   //for numerical stability
-            val = FAST_EXP(neu2[a].ac);
+            val = fasterexp(neu2[a].ac);
             sum += val;
             neu2[a].ac = val;
         }
@@ -2713,7 +2703,7 @@ void CRnnLM::testGen()
                 neu2[a].ac = 50;    //for numerical stability
             if (neu2[a].ac < -50)
                 neu2[a].ac = -50;   //for numerical stability
-            val = FAST_EXP(neu2[a].ac);
+            val = fasterexp(neu2[a].ac);
             sum += val;
             neu2[a].ac = val;
         }
